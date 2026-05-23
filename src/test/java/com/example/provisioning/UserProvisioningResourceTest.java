@@ -30,6 +30,7 @@ class UserProvisioningResourceTest {
                 )));
 
         given()
+                .header("X-User-Id", "alice")
                 .when().get("/api/users")
                 .then()
                 .statusCode(200)
@@ -56,6 +57,7 @@ class UserProvisioningResourceTest {
                 ));
 
         given()
+                .header("X-User-Id", "alice")
                 .when().get("/api/users/alice")
                 .then()
                 .statusCode(200)
@@ -81,6 +83,7 @@ class UserProvisioningResourceTest {
                 .thenReturn(new UserProvisioningResult("alice", "dev-alice", steps));
 
         given()
+                .header("X-User-Id", "alice")
                 .contentType("application/json")
                 .body("{\"userId\":\"alice\"}")
                 .when().post("/api/users")
@@ -100,6 +103,7 @@ class UserProvisioningResourceTest {
                 .thenReturn(new ProvisioningStepResult("namespace", "dev-alice", "completed", "Namespace created or updated."));
 
         given()
+                .header("X-User-Id", "alice")
                 .when().post("/api/users/alice/namespace")
                 .then()
                 .statusCode(200)
@@ -116,6 +120,7 @@ class UserProvisioningResourceTest {
                 .thenReturn(new ProvisioningStepResult("serviceAccount", "dev-alice", "completed", "ServiceAccount created or updated."));
 
         given()
+                .header("X-User-Id", "alice")
                 .when().post("/api/users/alice/service-account")
                 .then()
                 .statusCode(200)
@@ -132,6 +137,7 @@ class UserProvisioningResourceTest {
                 .thenReturn(new ProvisioningStepResult("rbac", "dev-alice", "completed", "RBAC created or updated."));
 
         given()
+                .header("X-User-Id", "alice")
                 .when().post("/api/users/alice/rbac")
                 .then()
                 .statusCode(200)
@@ -148,6 +154,7 @@ class UserProvisioningResourceTest {
                 .thenReturn(new ProvisioningStepResult("devcontainer", "dev-alice", "completed", "DevContainer Deployment created or updated."));
 
         given()
+                .header("X-User-Id", "alice")
                 .when().post("/api/users/alice/devcontainer")
                 .then()
                 .statusCode(200)
@@ -164,6 +171,7 @@ class UserProvisioningResourceTest {
                 .thenReturn(new ProvisioningStepResult("service", "dev-alice", "completed", "DevContainer Service created or updated."));
 
         given()
+                .header("X-User-Id", "alice")
                 .when().post("/api/users/alice/service")
                 .then()
                 .statusCode(200)
@@ -182,6 +190,7 @@ class UserProvisioningResourceTest {
                 )));
 
         given()
+                .header("X-User-Id", "alice")
                 .when().post("/api/users/alice/reconcile")
                 .then()
                 .statusCode(200)
@@ -197,6 +206,7 @@ class UserProvisioningResourceTest {
                 .thenReturn(new UserDeletionResult("alice", "dev-alice", "DELETING"));
 
         given()
+                .header("X-User-Id", "alice")
                 .when().delete("/api/users/alice")
                 .then()
                 .statusCode(200)
@@ -205,5 +215,22 @@ class UserProvisioningResourceTest {
                 .body("status", equalTo("DELETING"));
 
         verify(provisioningService).deleteUser("alice");
+    }
+
+    @Test
+    void rejectsNonAdminUser() {
+        given()
+                .header("X-User-Id", "bob")
+                .when().get("/api/users")
+                .then()
+                .statusCode(403);
+    }
+
+    @Test
+    void rejectsMissingAdminUserHeader() {
+        given()
+                .when().get("/api/users")
+                .then()
+                .statusCode(400);
     }
 }

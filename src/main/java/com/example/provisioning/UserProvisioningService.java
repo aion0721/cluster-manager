@@ -72,6 +72,9 @@ public class UserProvisioningService {
     @ConfigProperty(name = "cluster-manager.kubeconfig.insecure-skip-tls-verify")
     boolean kubeconfigInsecureSkipTlsVerify;
 
+    @ConfigProperty(name = "cluster-manager.service-account-token.expiration-seconds")
+    long serviceAccountTokenExpirationSeconds;
+
     public List<UserSummary> listUsers() {
         return kubernetesClient.namespaces()
                 .list()
@@ -141,7 +144,7 @@ public class UserProvisioningService {
                 .withName(serviceAccountName)
                 .tokenRequest(new TokenRequestBuilder()
                         .withNewSpec()
-                        .withExpirationSeconds(3600L)
+                        .withExpirationSeconds(serviceAccountTokenExpirationSeconds)
                         .endSpec()
                         .build());
 

@@ -13,6 +13,7 @@ class ProvisioningStepsResourceTest {
     @Test
     void returnsProvisioningStepsInOrder() {
         given()
+                .header("X-User-Id", "alice")
                 .when().get("/api/provisioning-steps")
                 .then()
                 .statusCode(200)
@@ -33,5 +34,14 @@ class ProvisioningStepsResourceTest {
                         "/api/users/{userId}/service"
                 ))
                 .body("order", contains(1, 2, 3, 4, 5));
+    }
+
+    @Test
+    void rejectsNonAdminUser() {
+        given()
+                .header("X-User-Id", "bob")
+                .when().get("/api/provisioning-steps")
+                .then()
+                .statusCode(403);
     }
 }

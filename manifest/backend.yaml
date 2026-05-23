@@ -1,0 +1,90 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cluster-manager-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-manager-backend
+  namespace: cluster-manager-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-manager-backend
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "services", "pods", "pods/log"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-manager-backend
+subjects:
+  - kind: ServiceAccount
+    name: cluster-manager-backend
+    namespace: cluster-manager-system
+roleRef:
+  kind: ClusterRole
+  name: cluster-manager-backend
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-manager-backend
+  namespace: cluster-manager-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-manager-backend
+  template:
+    metadata:
+      labels:
+        app: cluster-manager-backend
+    spec:
+      serviceAccountName: cluster-manager-backend
+      containers:
+        - name: backend
+          image: cluster-manager-backend:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: QUARKUS_HTTP_HOST
+              value: "0.0.0.0"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster-manager-backend
+  namespace: cluster-manager-system
+spec:
+  selector:
+    app: cluster-manager-backend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

@@ -63,6 +63,7 @@ class UserProvisioningServiceTest {
         service.kubeconfigClusterName = "k3s";
         service.kubeconfigServer = "https://k3s.example.test:6443";
         service.kubeconfigInsecureSkipTlsVerify = true;
+        service.serviceAccountTokenExpirationSeconds = 7200L;
 
         namespaces = mock(MixedOperation.class);
         namespaceResource = mock(Resource.class);
@@ -219,7 +220,7 @@ class UserProvisioningServiceTest {
         verify(namespacedServiceAccounts, times(2)).withName(eq("dev-user"));
         verify(serviceAccountLookup).tokenRequest(tokenRequestCaptor.capture());
         TokenRequest tokenRequest = tokenRequestCaptor.getValue();
-        assertEquals(3600L, tokenRequest.getSpec().getExpirationSeconds());
+        assertEquals(7200L, tokenRequest.getSpec().getExpirationSeconds());
         assertTrue(tokenRequest.getSpec().getAudiences() == null || tokenRequest.getSpec().getAudiences().isEmpty());
     }
 

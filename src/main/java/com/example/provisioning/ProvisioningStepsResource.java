@@ -1,5 +1,6 @@
 package com.example.provisioning;
 
+import com.example.security.AdminRequired;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
@@ -9,6 +10,7 @@ import java.util.List;
 
 @Path("/api/provisioning-steps")
 @Produces(MediaType.APPLICATION_JSON)
+@AdminRequired
 public class ProvisioningStepsResource {
 
     @GET

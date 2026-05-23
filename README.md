@@ -35,6 +35,57 @@ If you want to build an _über-jar_, execute the following command:
 
 The application, packaged as an _über-jar_, is now runnable using `java -jar target/*-runner.jar`.
 
+## Building a container image for k3s
+
+For the MVP, build the JVM container image locally and import it into the Raspberry Pi k3s container runtime.
+
+On the development machine:
+
+```powershell
+.\mvnw.cmd package
+docker build -f src/main/docker/Dockerfile.jvm -t cluster-manager-backend:0.1.0 .
+docker save cluster-manager-backend:0.1.0 -o cluster-manager-backend_0.1.0.tar
+```
+
+Copy `cluster-manager-backend_0.1.0.tar` to the Raspberry Pi, then import it into k3s:
+
+```bash
+sudo k3s ctr images import cluster-manager-backend_0.1.0.tar
+sudo k3s ctr images list | grep cluster-manager-backend
+```
+
+Use the same image tag in the Kubernetes Deployment:
+
+```yaml
+containers:
+  - name: cluster-manager-backend
+    image: cluster-manager-backend:0.1.0
+    imagePullPolicy: IfNotPresent
+```
+
+If the image is built on a machine with a different CPU architecture from the Raspberry Pi, build for the Pi architecture explicitly. For a 64-bit Raspberry Pi OS, use `linux/arm64`:
+
+```powershell
+docker buildx build --platform linux/arm64 -f src/main/docker/Dockerfile.jvm -t cluster-manager-backend:0.1.0 --load .
+docker save cluster-manager-backend:0.1.0 -o cluster-manager-backend_0.1.0.tar
+```
+
+Backend configuration can be passed as environment variables in the Deployment. For example:
+
+```yaml
+env:
+  - name: CLUSTER_MANAGER_ADMIN_USER_IDS
+    value: "koba,tanaka"
+  - name: CLUSTER_MANAGER_SERVICE_ACCOUNT_TOKEN_EXPIRATION_SECONDS
+    value: "3600"
+  - name: CLUSTER_MANAGER_KUBECONFIG_CLUSTER_NAME
+    value: "k3s"
+  - name: CLUSTER_MANAGER_KUBECONFIG_SERVER
+    value: "https://rp.local:6443"
+  - name: CLUSTER_MANAGER_KUBECONFIG_INSECURE_SKIP_TLS_VERIFY
+    value: "true"
+```
+
 ## Creating a native executable
 
 You can create a native executable using:

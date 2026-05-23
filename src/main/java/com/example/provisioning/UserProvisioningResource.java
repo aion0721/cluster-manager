@@ -1,5 +1,6 @@
 package com.example.provisioning;
 
+import com.example.security.AdminRequired;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
@@ -15,6 +16,7 @@ import java.util.List;
 
 @Path("/api/users")
 @Produces(MediaType.APPLICATION_JSON)
+@AdminRequired
 public class UserProvisioningResource {
 
     @Inject
