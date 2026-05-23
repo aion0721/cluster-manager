@@ -35,6 +35,14 @@ This repository is the backend for `cluster-manager`.
 Cluster-manager behavior should be driven by `application.properties` where practical.
 Avoid hard-coding cluster-manager labels, names, images, and prefixes in business logic.
 
+## Testing Policy
+
+- When adding or changing application code, add or update tests in the same change.
+- REST resources should have Quarkus tests that verify endpoint paths, HTTP methods, request bodies, and response shapes.
+- Kubernetes-dependent behavior should be tested with mocks or focused unit tests by default, so normal test runs do not require a live cluster.
+- Use live k3s/OpenShift checks only as explicit manual or integration verification, not as the default test requirement.
+- Run `cmd /c .\mvnw.cmd test` before considering implementation work complete.
+
 ## Scope Notes
 
 - The first implementation scope is Kubernetes connectivity checks and project policy setup.
