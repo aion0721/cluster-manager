@@ -25,6 +25,12 @@ public class UserProvisioningResource {
         return provisioningService.listUsers();
     }
 
+    @GET
+    @Path("/{userId}")
+    public UserDetail user(@PathParam("userId") String userId) {
+        return provisioningService.getUser(userId);
+    }
+
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     public UserProvisioningResult createUser(CreateUserRequest request) {

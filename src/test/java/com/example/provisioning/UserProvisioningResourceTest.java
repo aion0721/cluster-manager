@@ -42,6 +42,36 @@ class UserProvisioningResourceTest {
     }
 
     @Test
+    void getsUserDetail() {
+        when(provisioningService.getUser("alice"))
+                .thenReturn(new UserDetail(
+                        "alice",
+                        "dev-alice",
+                        "Active",
+                        "dev-user",
+                        "devcontainer",
+                        "devcontainer",
+                        "READY",
+                        "2026-05-23T09:00:00Z"
+                ));
+
+        given()
+                .when().get("/api/users/alice")
+                .then()
+                .statusCode(200)
+                .body("userId", equalTo("alice"))
+                .body("namespace", equalTo("dev-alice"))
+                .body("phase", equalTo("Active"))
+                .body("serviceAccount", equalTo("dev-user"))
+                .body("deployment", equalTo("devcontainer"))
+                .body("service", equalTo("devcontainer"))
+                .body("status", equalTo("READY"))
+                .body("createdAt", equalTo("2026-05-23T09:00:00Z"));
+
+        verify(provisioningService).getUser("alice");
+    }
+
+    @Test
     void createsUserByRunningAllSteps() {
         List<ProvisioningStepResult> steps = List.of(
                 new ProvisioningStepResult("namespace", "dev-alice", "completed", "Namespace created or updated."),

@@ -1,5 +1,12 @@
 package com.example.provisioning;
 
+import com.example.me.ConnectionGuide;
+import com.example.me.KubectlSetupCommandResponse;
+import com.example.me.ServiceAccountTokenResponse;
+import com.example.security.UserIdValidator;
+import io.fabric8.kubernetes.api.model.ServiceAccount;
+import io.fabric8.kubernetes.api.model.authentication.TokenRequest;
+import io.fabric8.kubernetes.api.model.authentication.TokenRequestBuilder;
 import io.fabric8.kubernetes.api.model.ContainerBuilder;
 import io.fabric8.kubernetes.api.model.Namespace;
 import io.fabric8.kubernetes.api.model.NamespaceBuilder;
@@ -28,12 +35,9 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class UserProvisioningService {
-
-    private static final Pattern USER_ID_PATTERN = Pattern.compile("[a-z0-9]([-a-z0-9]*[a-z0-9])?");
 
     @Inject
     KubernetesClient kubernetesClient;
@@ -59,6 +63,15 @@ public class UserProvisioningService {
     @ConfigProperty(name = "cluster-manager.devcontainer.service-name")
     String serviceName;
 
+    @ConfigProperty(name = "cluster-manager.kubeconfig.cluster-name")
+    String kubeconfigClusterName;
+
+    @ConfigProperty(name = "cluster-manager.kubeconfig.server")
+    String kubeconfigServer;
+
+    @ConfigProperty(name = "cluster-manager.kubeconfig.insecure-skip-tls-verify")
+    boolean kubeconfigInsecureSkipTlsVerify;
+
     public List<UserSummary> listUsers() {
         return kubernetesClient.namespaces()
                 .list()
@@ -68,6 +81,119 @@ public class UserProvisioningService {
                 .map(this::toUserSummary)
                 .sorted(Comparator.comparing(UserSummary::namespace))
                 .toList();
+    }
+
+    public UserDetail getUser(String userId) {
+        validateUserId(userId);
+        String namespaceName = namespaceName(userId);
+
+        Namespace namespace = getManagedNamespace(userId);
+
+        boolean serviceAccountExists = kubernetesClient.serviceAccounts()
+                .inNamespace(namespaceName)
+                .withName(serviceAccountName)
+                .get() != null;
+        boolean deploymentExists = kubernetesClient.apps().deployments()
+                .inNamespace(namespaceName)
+                .withName(deploymentName)
+                .get() != null;
+        boolean serviceExists = kubernetesClient.services()
+                .inNamespace(namespaceName)
+                .withName(serviceName)
+                .get() != null;
+
+        return new UserDetail(
+                userId,
+                namespaceName,
+                namespace.getStatus() == null ? null : namespace.getStatus().getPhase(),
+                serviceAccountExists ? serviceAccountName : null,
+                deploymentExists ? deploymentName : null,
+                serviceExists ? serviceName : null,
+                userStatus(namespace, serviceAccountExists, deploymentExists, serviceExists),
+                namespace.getMetadata().getCreationTimestamp()
+        );
+    }
+
+    public ConnectionGuide connectionGuide(String userId) {
+        validateUserId(userId);
+        String namespaceName = namespaceName(userId);
+        getManagedNamespace(userId);
+
+        String portForwardCommand = "kubectl -n " + namespaceName + " port-forward svc/" + serviceName + " 2222:22";
+        return new ConnectionGuide(namespaceName, serviceAccountName, portForwardCommand);
+    }
+
+    public ServiceAccountTokenResponse createServiceAccountToken(String userId) {
+        validateUserId(userId);
+        String namespaceName = namespaceName(userId);
+        getManagedNamespace(userId);
+
+        ServiceAccount serviceAccount = kubernetesClient.serviceAccounts()
+                .inNamespace(namespaceName)
+                .withName(serviceAccountName)
+                .get();
+        if (serviceAccount == null) {
+            throw new NotFoundException("ServiceAccount not found: " + namespaceName + "/" + serviceAccountName);
+        }
+
+        TokenRequest tokenRequest = kubernetesClient.serviceAccounts()
+                .inNamespace(namespaceName)
+                .withName(serviceAccountName)
+                .tokenRequest(new TokenRequestBuilder()
+                        .withNewSpec()
+                        .withExpirationSeconds(3600L)
+                        .endSpec()
+                        .build());
+
+        return new ServiceAccountTokenResponse(
+                tokenRequest.getStatus().getToken(),
+                namespaceName,
+                serviceAccountName,
+                tokenRequest.getStatus().getExpirationTimestamp()
+        );
+    }
+
+    public KubectlSetupCommandResponse kubectlSetupCommand(String userId) {
+        ServiceAccountTokenResponse token = createServiceAccountToken(userId);
+        String contextName = token.namespace() + "@" + kubeconfigClusterName;
+        String credentialName = token.namespace() + "-user";
+
+        String powershell = String.join(System.lineSeparator(),
+                "kubectl config set-cluster " + kubeconfigClusterName
+                        + " --server=" + kubeconfigServer
+                        + " --insecure-skip-tls-verify=" + kubeconfigInsecureSkipTlsVerify,
+                "kubectl config set-credentials " + credentialName + " --token=\"" + escapePowerShellDoubleQuoted(token.token()) + "\"",
+                "kubectl config set-context " + contextName
+                        + " --cluster=" + kubeconfigClusterName
+                        + " --user=" + credentialName
+                        + " --namespace=" + token.namespace(),
+                "kubectl config use-context " + contextName,
+                "kubectl get pods"
+        );
+
+        String bash = String.join(System.lineSeparator(),
+                "kubectl config set-cluster " + kubeconfigClusterName
+                        + " --server=" + kubeconfigServer
+                        + " --insecure-skip-tls-verify=" + kubeconfigInsecureSkipTlsVerify,
+                "kubectl config set-credentials " + credentialName + " --token='" + escapeBashSingleQuoted(token.token()) + "'",
+                "kubectl config set-context " + contextName
+                        + " --cluster=" + kubeconfigClusterName
+                        + " --user=" + credentialName
+                        + " --namespace=" + token.namespace(),
+                "kubectl config use-context " + contextName,
+                "kubectl get pods"
+        );
+
+        return new KubectlSetupCommandResponse(
+                token.namespace(),
+                token.serviceAccount(),
+                kubeconfigClusterName,
+                contextName,
+                credentialName,
+                token.expiresAt(),
+                powershell,
+                bash
+        );
     }
 
     public UserProvisioningResult provision(String userId) {
@@ -252,12 +378,7 @@ public class UserProvisioningService {
             throw new NotFoundException("Namespace not found: " + namespaceName);
         }
 
-        Map<String, String> labels = namespace.getMetadata().getLabels();
-        if (labels == null
-                || !managedBy.equals(labels.get("app.kubernetes.io/managed-by"))
-                || !userId.equals(labels.get(labelPrefix + "/user-id"))) {
-            throw new ForbiddenException("Namespace is not managed by cluster-manager for userId: " + userId);
-        }
+        assertManagedUserNamespace(namespace, userId);
 
         kubernetesClient.namespaces().withName(namespaceName).delete();
         return new UserDeletionResult(userId, namespaceName, "DELETING");
@@ -288,14 +409,49 @@ public class UserProvisioningService {
         );
     }
 
+    private Namespace getManagedNamespace(String userId) {
+        String namespaceName = namespaceName(userId);
+        Namespace namespace = kubernetesClient.namespaces().withName(namespaceName).get();
+        if (namespace == null) {
+            throw new NotFoundException("Namespace not found: " + namespaceName);
+        }
+        assertManagedUserNamespace(namespace, userId);
+        return namespace;
+    }
+
+    private void assertManagedUserNamespace(Namespace namespace, String userId) {
+        Map<String, String> labels = namespace.getMetadata().getLabels();
+        if (labels == null
+                || !managedBy.equals(labels.get("app.kubernetes.io/managed-by"))
+                || !userId.equals(labels.get(labelPrefix + "/user-id"))) {
+            throw new ForbiddenException("Namespace is not managed by cluster-manager for userId: " + userId);
+        }
+    }
+
+    private String userStatus(Namespace namespace, boolean serviceAccountExists, boolean deploymentExists, boolean serviceExists) {
+        if (namespace.getMetadata().getDeletionTimestamp() != null) {
+            return "DELETING";
+        }
+        if (serviceAccountExists && deploymentExists && serviceExists) {
+            return "READY";
+        }
+        return "PARTIAL";
+    }
+
     private String namespaceName(String userId) {
         return namespacePrefix + userId;
     }
 
+    private String escapePowerShellDoubleQuoted(String value) {
+        return value.replace("`", "``").replace("\"", "`\"");
+    }
+
+    private String escapeBashSingleQuoted(String value) {
+        return value.replace("'", "'\"'\"'");
+    }
+
     private void validateUserId(String userId) {
-        if (userId == null || !USER_ID_PATTERN.matcher(userId).matches()) {
-            throw new BadRequestException("userId must match [a-z0-9]([-a-z0-9]*[a-z0-9])?");
-        }
+        UserIdValidator.validate(userId);
         String namespaceName = namespaceName(userId);
         if (namespaceName.length() > 63) {
             throw new BadRequestException("namespace name must be 63 characters or shorter: " + namespaceName);
