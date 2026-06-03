@@ -13,10 +13,12 @@ import io.fabric8.kubernetes.api.model.NamespaceBuilder;
 import io.fabric8.kubernetes.api.model.ObjectMetaBuilder;
 import io.fabric8.kubernetes.api.model.PodSpecBuilder;
 import io.fabric8.kubernetes.api.model.PodTemplateSpecBuilder;
+import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServiceAccountBuilder;
 import io.fabric8.kubernetes.api.model.ServiceBuilder;
 import io.fabric8.kubernetes.api.model.ServicePortBuilder;
 import io.fabric8.kubernetes.api.model.apps.DeploymentBuilder;
+import io.fabric8.kubernetes.api.model.rbac.PolicyRule;
 import io.fabric8.kubernetes.api.model.rbac.PolicyRuleBuilder;
 import io.fabric8.kubernetes.api.model.rbac.RoleBindingBuilder;
 import io.fabric8.kubernetes.api.model.rbac.RoleBuilder;
@@ -45,6 +47,12 @@ public class UserProvisioningService {
     @ConfigProperty(name = "cluster-manager.namespace-prefix")
     String namespacePrefix;
 
+    @ConfigProperty(name = "cluster-manager.provisioning.mode")
+    String provisioningMode;
+
+    @ConfigProperty(name = "cluster-manager.container-only.namespace")
+    String containerOnlyNamespace;
+
     @ConfigProperty(name = "cluster-manager.managed-by")
     String managedBy;
 
@@ -63,6 +71,12 @@ public class UserProvisioningService {
     @ConfigProperty(name = "cluster-manager.devcontainer.service-name")
     String serviceName;
 
+    @ConfigProperty(name = "cluster-manager.devcontainer.service-type")
+    String serviceType;
+
+    @ConfigProperty(name = "cluster-manager.devcontainer.ssh-host")
+    String sshHost;
+
     @ConfigProperty(name = "cluster-manager.kubeconfig.cluster-name")
     String kubeconfigClusterName;
 
@@ -76,6 +90,18 @@ public class UserProvisioningService {
     long serviceAccountTokenExpirationSeconds;
 
     public List<UserSummary> listUsers() {
+        if (mode() == ProvisioningMode.CONTAINER_ONLY) {
+            return kubernetesClient.services()
+                    .inNamespace(containerOnlyNamespace)
+                    .list()
+                    .getItems()
+                    .stream()
+                    .filter(this::isManagedUserService)
+                    .map(this::toContainerOnlyUserSummary)
+                    .sorted(Comparator.comparing(UserSummary::namespace).thenComparing(UserSummary::userId))
+                    .toList();
+        }
+
         return kubernetesClient.namespaces()
                 .list()
                 .getItems()
@@ -88,60 +114,93 @@ public class UserProvisioningService {
 
     public UserDetail getUser(String userId) {
         validateUserId(userId);
-        String namespaceName = namespaceName(userId);
-
-        Namespace namespace = getManagedNamespace(userId);
+        String namespaceName = workloadNamespace(userId);
+        Namespace namespace = mode() == ProvisioningMode.NAMESPACE ? getManagedNamespace(userId) : null;
 
         boolean serviceAccountExists = kubernetesClient.serviceAccounts()
                 .inNamespace(namespaceName)
-                .withName(serviceAccountName)
+                .withName(serviceAccountName(userId))
                 .get() != null;
         boolean deploymentExists = kubernetesClient.apps().deployments()
                 .inNamespace(namespaceName)
-                .withName(deploymentName)
+                .withName(deploymentName(userId))
                 .get() != null;
-        boolean serviceExists = kubernetesClient.services()
+        Service userService = kubernetesClient.services()
                 .inNamespace(namespaceName)
-                .withName(serviceName)
-                .get() != null;
+                .withName(serviceName(userId))
+                .get();
+        if (mode() == ProvisioningMode.CONTAINER_ONLY && userService != null) {
+            assertManagedUserService(userService, userId);
+        }
+        boolean serviceExists = userService != null;
+        if (mode() == ProvisioningMode.CONTAINER_ONLY && !serviceAccountExists && !deploymentExists && !serviceExists) {
+            throw new NotFoundException("DevContainer assignment not found for userId: " + userId);
+        }
 
         return new UserDetail(
                 userId,
                 namespaceName,
-                namespace.getStatus() == null ? null : namespace.getStatus().getPhase(),
-                serviceAccountExists ? serviceAccountName : null,
-                deploymentExists ? deploymentName : null,
-                serviceExists ? serviceName : null,
+                namespace == null || namespace.getStatus() == null ? null : namespace.getStatus().getPhase(),
+                serviceAccountExists ? serviceAccountName(userId) : null,
+                deploymentExists ? deploymentName(userId) : null,
+                serviceExists ? serviceName(userId) : null,
                 userStatus(namespace, serviceAccountExists, deploymentExists, serviceExists),
-                namespace.getMetadata().getCreationTimestamp()
+                createdAt(namespace, userService),
+                mode().configValue(),
+                endpoint(userService)
         );
     }
 
     public ConnectionGuide connectionGuide(String userId) {
         validateUserId(userId);
-        String namespaceName = namespaceName(userId);
-        getManagedNamespace(userId);
+        String namespaceName = workloadNamespace(userId);
+        if (mode() == ProvisioningMode.NAMESPACE) {
+            getManagedNamespace(userId);
+        }
 
-        String portForwardCommand = "kubectl -n " + namespaceName + " port-forward svc/" + serviceName + " 2222:22";
-        return new ConnectionGuide(namespaceName, serviceAccountName, portForwardCommand);
+        Service userService = kubernetesClient.services()
+                .inNamespace(namespaceName)
+                .withName(serviceName(userId))
+                .get();
+        if (mode() == ProvisioningMode.CONTAINER_ONLY && userService != null) {
+            assertManagedUserService(userService, userId);
+        }
+        DevcontainerEndpoint endpoint = endpoint(userService);
+        String portForwardCommand = mode() == ProvisioningMode.NAMESPACE
+                ? "kubectl -n " + namespaceName + " port-forward svc/" + serviceName(userId) + " 2222:22"
+                : null;
+        return new ConnectionGuide(
+                namespaceName,
+                serviceAccountName(userId),
+                portForwardCommand,
+                endpoint == null ? serviceName(userId) : endpoint.service(),
+                endpoint == null ? null : endpoint.serviceType(),
+                endpoint == null ? null : endpoint.servicePort(),
+                endpoint == null ? null : endpoint.nodePort(),
+                endpoint == null ? sshHost : endpoint.sshHost(),
+                endpoint == null ? null : endpoint.sshCommand()
+        );
     }
 
     public ServiceAccountTokenResponse createServiceAccountToken(String userId) {
         validateUserId(userId);
-        String namespaceName = namespaceName(userId);
+        String namespaceName = workloadNamespace(userId);
+        if (mode() != ProvisioningMode.NAMESPACE) {
+            throw new BadRequestException("ServiceAccount token API is available only in namespace mode.");
+        }
         getManagedNamespace(userId);
 
         ServiceAccount serviceAccount = kubernetesClient.serviceAccounts()
                 .inNamespace(namespaceName)
-                .withName(serviceAccountName)
+                .withName(serviceAccountName(userId))
                 .get();
         if (serviceAccount == null) {
-            throw new NotFoundException("ServiceAccount not found: " + namespaceName + "/" + serviceAccountName);
+            throw new NotFoundException("ServiceAccount not found: " + namespaceName + "/" + serviceAccountName(userId));
         }
 
         TokenRequest tokenRequest = kubernetesClient.serviceAccounts()
                 .inNamespace(namespaceName)
-                .withName(serviceAccountName)
+                .withName(serviceAccountName(userId))
                 .tokenRequest(new TokenRequestBuilder()
                         .withNewSpec()
                         .withExpirationSeconds(serviceAccountTokenExpirationSeconds)
@@ -151,7 +210,7 @@ public class UserProvisioningService {
         return new ServiceAccountTokenResponse(
                 tokenRequest.getStatus().getToken(),
                 namespaceName,
-                serviceAccountName,
+                serviceAccountName(userId),
                 tokenRequest.getStatus().getExpirationTimestamp()
         );
     }
@@ -203,18 +262,23 @@ public class UserProvisioningService {
         validateUserId(userId);
 
         List<ProvisioningStepResult> results = new ArrayList<>();
-        results.add(ensureNamespace(userId));
+        if (mode() == ProvisioningMode.NAMESPACE) {
+            results.add(ensureNamespace(userId));
+        }
         results.add(ensureServiceAccount(userId));
         results.add(ensureRbac(userId));
         results.add(ensureDevcontainer(userId));
         results.add(ensureService(userId));
 
-        return new UserProvisioningResult(userId, namespaceName(userId), results);
+        return new UserProvisioningResult(userId, workloadNamespace(userId), results);
     }
 
     public ProvisioningStepResult ensureNamespace(String userId) {
         validateUserId(userId);
         String namespaceName = namespaceName(userId);
+        if (mode() != ProvisioningMode.NAMESPACE) {
+            throw new BadRequestException("Namespace step is available only in namespace mode.");
+        }
 
         Namespace existing = kubernetesClient.namespaces().withName(namespaceName).get();
         if (existing == null) {
@@ -239,16 +303,18 @@ public class UserProvisioningService {
 
     public ProvisioningStepResult ensureServiceAccount(String userId) {
         validateUserId(userId);
-        String namespaceName = namespaceName(userId);
-        ensureNamespace(userId);
+        String namespaceName = workloadNamespace(userId);
+        if (mode() == ProvisioningMode.NAMESPACE) {
+            ensureNamespace(userId);
+        }
 
         kubernetesClient.serviceAccounts()
                 .inNamespace(namespaceName)
                 .resource(new ServiceAccountBuilder()
                         .withMetadata(new ObjectMetaBuilder()
-                                .withName(serviceAccountName)
+                                .withName(serviceAccountName(userId))
                                 .withNamespace(namespaceName)
-                                .withLabels(commonLabels())
+                                .withLabels(userResourceLabels(userId, "service-account"))
                                 .build())
                         .build())
                 .createOrReplace();
@@ -258,25 +324,19 @@ public class UserProvisioningService {
 
     public ProvisioningStepResult ensureRbac(String userId) {
         validateUserId(userId);
-        String namespaceName = namespaceName(userId);
+        String namespaceName = workloadNamespace(userId);
         ensureServiceAccount(userId);
 
-        String roleName = serviceAccountName;
+        String roleName = serviceAccountName(userId);
         kubernetesClient.rbac().roles()
                 .inNamespace(namespaceName)
                 .resource(new RoleBuilder()
                         .withMetadata(new ObjectMetaBuilder()
                                 .withName(roleName)
                                 .withNamespace(namespaceName)
-                                .withLabels(commonLabels())
+                                .withLabels(userResourceLabels(userId, "role"))
                                 .build())
-                        .withRules(
-                                new PolicyRuleBuilder()
-                                        .withApiGroups("", "apps")
-                                        .withResources("pods", "pods/log", "services", "deployments")
-                                        .withVerbs("get", "list", "watch")
-                                        .build()
-                        )
+                        .withRules(rbacRules(userId))
                         .build())
                 .createOrReplace();
 
@@ -286,11 +346,11 @@ public class UserProvisioningService {
                         .withMetadata(new ObjectMetaBuilder()
                                 .withName(roleName)
                                 .withNamespace(namespaceName)
-                                .withLabels(commonLabels())
+                                .withLabels(userResourceLabels(userId, "role-binding"))
                                 .build())
                         .withSubjects(new SubjectBuilder()
                                 .withKind("ServiceAccount")
-                                .withName(serviceAccountName)
+                                .withName(serviceAccountName(userId))
                                 .withNamespace(namespaceName)
                                 .build())
                         .withRoleRef(new RoleRefBuilder()
@@ -306,17 +366,17 @@ public class UserProvisioningService {
 
     public ProvisioningStepResult ensureDevcontainer(String userId) {
         validateUserId(userId);
-        String namespaceName = namespaceName(userId);
+        String namespaceName = workloadNamespace(userId);
         ensureRbac(userId);
 
-        Map<String, String> selectorLabels = devcontainerLabels();
+        Map<String, String> selectorLabels = devcontainerLabels(userId);
         kubernetesClient.apps().deployments()
                 .inNamespace(namespaceName)
                 .resource(new DeploymentBuilder()
                         .withMetadata(new ObjectMetaBuilder()
-                                .withName(deploymentName)
+                                .withName(deploymentName(userId))
                                 .withNamespace(namespaceName)
-                                .withLabels(commonLabels())
+                                .withLabels(userResourceLabels(userId, "deployment"))
                                 .build())
                         .withNewSpec()
                         .withReplicas(1)
@@ -328,7 +388,7 @@ public class UserProvisioningService {
                                         .withLabels(selectorLabels)
                                         .build())
                                 .withSpec(new PodSpecBuilder()
-                                        .withServiceAccountName(serviceAccountName)
+                                        .withServiceAccountName(serviceAccountName(userId))
                                         .withContainers(new ContainerBuilder()
                                                 .withName(deploymentName)
                                                 .withImage(devcontainerImage)
@@ -346,20 +406,20 @@ public class UserProvisioningService {
 
     public ProvisioningStepResult ensureService(String userId) {
         validateUserId(userId);
-        String namespaceName = namespaceName(userId);
+        String namespaceName = workloadNamespace(userId);
         ensureDevcontainer(userId);
 
         kubernetesClient.services()
                 .inNamespace(namespaceName)
                 .resource(new ServiceBuilder()
                         .withMetadata(new ObjectMetaBuilder()
-                                .withName(serviceName)
+                                .withName(serviceName(userId))
                                 .withNamespace(namespaceName)
-                                .withLabels(commonLabels())
+                                .withLabels(userResourceLabels(userId, "service"))
                                 .build())
                         .withNewSpec()
-                        .withType("ClusterIP")
-                        .withSelector(devcontainerLabels())
+                        .withType(serviceTypeForMode())
+                        .withSelector(devcontainerLabels(userId))
                         .withPorts(new ServicePortBuilder()
                                 .withName("ssh")
                                 .withPort(22)
@@ -375,6 +435,9 @@ public class UserProvisioningService {
     public UserDeletionResult deleteUser(String userId) {
         validateUserId(userId);
         String namespaceName = namespaceName(userId);
+        if (mode() != ProvisioningMode.NAMESPACE) {
+            throw new BadRequestException("Delete user is available only in namespace mode.");
+        }
 
         Namespace namespace = kubernetesClient.namespaces().withName(namespaceName).get();
         if (namespace == null) {
@@ -432,7 +495,7 @@ public class UserProvisioningService {
     }
 
     private String userStatus(Namespace namespace, boolean serviceAccountExists, boolean deploymentExists, boolean serviceExists) {
-        if (namespace.getMetadata().getDeletionTimestamp() != null) {
+        if (namespace != null && namespace.getMetadata().getDeletionTimestamp() != null) {
             return "DELETING";
         }
         if (serviceAccountExists && deploymentExists && serviceExists) {
@@ -443,6 +506,118 @@ public class UserProvisioningService {
 
     private String namespaceName(String userId) {
         return namespacePrefix + userId;
+    }
+
+    private String workloadNamespace(String userId) {
+        return mode() == ProvisioningMode.NAMESPACE ? namespaceName(userId) : containerOnlyNamespace;
+    }
+
+    private ProvisioningMode mode() {
+        return ProvisioningMode.fromConfig(provisioningMode);
+    }
+
+    private String serviceAccountName(String userId) {
+        return resourceName(serviceAccountName, userId);
+    }
+
+    private String deploymentName(String userId) {
+        return resourceName(deploymentName, userId);
+    }
+
+    private String serviceName(String userId) {
+        return resourceName(serviceName, userId);
+    }
+
+    private String resourceName(String baseName, String userId) {
+        if (mode() == ProvisioningMode.NAMESPACE) {
+            return baseName;
+        }
+        return baseName + "-" + userId;
+    }
+
+    private String serviceTypeForMode() {
+        return mode() == ProvisioningMode.CONTAINER_ONLY ? "NodePort" : serviceType;
+    }
+
+    private List<PolicyRule> rbacRules(String userId) {
+        if (mode() == ProvisioningMode.NAMESPACE) {
+            return List.of(new PolicyRuleBuilder()
+                    .withApiGroups("", "apps")
+                    .withResources("pods", "pods/log", "services", "deployments")
+                    .withVerbs("get", "list", "watch")
+                    .build());
+        }
+
+        return List.of(
+                new PolicyRuleBuilder()
+                        .withApiGroups("")
+                        .withResources("services")
+                        .withResourceNames(serviceName(userId))
+                        .withVerbs("get")
+                        .build(),
+                new PolicyRuleBuilder()
+                        .withApiGroups("apps")
+                        .withResources("deployments")
+                        .withResourceNames(deploymentName(userId))
+                        .withVerbs("get")
+                        .build()
+        );
+    }
+
+    private boolean isManagedUserService(Service service) {
+        Map<String, String> labels = service.getMetadata().getLabels();
+        return labels != null
+                && managedBy.equals(labels.get("app.kubernetes.io/managed-by"))
+                && "service".equals(labels.get(labelPrefix + "/resource-kind"))
+                && labels.containsKey(labelPrefix + "/user-id");
+    }
+
+    private void assertManagedUserService(Service service, String userId) {
+        Map<String, String> labels = service.getMetadata().getLabels();
+        if (labels == null
+                || !managedBy.equals(labels.get("app.kubernetes.io/managed-by"))
+                || !"service".equals(labels.get(labelPrefix + "/resource-kind"))
+                || !userId.equals(labels.get(labelPrefix + "/user-id"))) {
+            throw new ForbiddenException("Service is not managed by cluster-manager for userId: " + userId);
+        }
+    }
+
+    private UserSummary toContainerOnlyUserSummary(Service service) {
+        Map<String, String> labels = service.getMetadata().getLabels();
+        Map<String, String> annotations = service.getMetadata().getAnnotations();
+        return new UserSummary(
+                labels.get(labelPrefix + "/user-id"),
+                service.getMetadata().getNamespace(),
+                null,
+                labels == null ? Map.of() : Map.copyOf(labels),
+                annotations == null ? Map.of() : Map.copyOf(annotations)
+        );
+    }
+
+    private String createdAt(Namespace namespace, Service service) {
+        if (namespace != null) {
+            return namespace.getMetadata().getCreationTimestamp();
+        }
+        return service == null ? null : service.getMetadata().getCreationTimestamp();
+    }
+
+    private DevcontainerEndpoint endpoint(Service service) {
+        if (service == null || service.getSpec() == null || service.getSpec().getPorts() == null
+                || service.getSpec().getPorts().isEmpty()) {
+            return null;
+        }
+
+        var port = service.getSpec().getPorts().get(0);
+        Integer nodePort = port.getNodePort();
+        String command = nodePort == null ? null : "ssh -p " + nodePort + " " + sshHost;
+        return new DevcontainerEndpoint(
+                service.getMetadata().getName(),
+                service.getSpec().getType(),
+                port.getPort(),
+                nodePort,
+                nodePort == null ? null : sshHost,
+                command
+        );
     }
 
     private String escapePowerShellDoubleQuoted(String value) {
@@ -459,6 +634,17 @@ public class UserProvisioningService {
         if (namespaceName.length() > 63) {
             throw new BadRequestException("namespace name must be 63 characters or shorter: " + namespaceName);
         }
+        if (mode() == ProvisioningMode.CONTAINER_ONLY) {
+            validateResourceName(serviceAccountName(userId), "serviceAccount name");
+            validateResourceName(deploymentName(userId), "deployment name");
+            validateResourceName(serviceName(userId), "service name");
+        }
+    }
+
+    private void validateResourceName(String value, String fieldName) {
+        if (value.length() > 63) {
+            throw new BadRequestException(fieldName + " must be 63 characters or shorter: " + value);
+        }
     }
 
     private Map<String, String> namespaceLabels(String userId) {
@@ -474,9 +660,17 @@ public class UserProvisioningService {
         return annotations;
     }
 
-    private Map<String, String> devcontainerLabels() {
+    private Map<String, String> devcontainerLabels(String userId) {
         Map<String, String> labels = commonLabels();
-        labels.put("app.kubernetes.io/name", deploymentName);
+        labels.put("app.kubernetes.io/name", deploymentName(userId));
+        labels.put(labelPrefix + "/user-id", userId);
+        return labels;
+    }
+
+    private Map<String, String> userResourceLabels(String userId, String resourceKind) {
+        Map<String, String> labels = commonLabels();
+        labels.put(labelPrefix + "/resource-kind", resourceKind);
+        labels.put(labelPrefix + "/user-id", userId);
         return labels;
     }
 

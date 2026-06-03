@@ -86,6 +86,23 @@ env:
     value: "true"
 ```
 
+## Provisioning modes
+
+`cluster-manager` supports two provisioning modes:
+
+- `namespace`: the existing mode. Each developer gets a Namespace named `dev-{userId}`. The backend creates the Namespace, ServiceAccount, RBAC, DevContainer Deployment, and ClusterIP Service.
+- `container-only`: the backend does not create a Namespace. It creates user-specific ServiceAccount, RBAC, DevContainer Deployment, and NodePort Service inside `cluster-manager.container-only.namespace`.
+
+Container-only example:
+
+```properties
+cluster-manager.provisioning.mode=container-only
+cluster-manager.container-only.namespace=devcontainers
+cluster-manager.devcontainer.ssh-host=rp.local
+```
+
+For user `alice`, container-only mode creates resources such as `dev-user-alice` and `devcontainer-alice` in the shared Namespace. `/api/me` and `/api/me/connection-guide` include the assigned NodePort Service information and an SSH command such as `ssh -p 30022 rp.local` after Kubernetes assigns the NodePort.
+
 ## Creating a native executable
 
 You can create a native executable using:

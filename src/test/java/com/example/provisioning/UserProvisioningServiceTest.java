@@ -10,6 +10,7 @@ import io.fabric8.kubernetes.api.model.ServiceAccount;
 import io.fabric8.kubernetes.api.model.ServiceAccountList;
 import io.fabric8.kubernetes.api.model.ServiceBuilder;
 import io.fabric8.kubernetes.api.model.ServiceList;
+import io.fabric8.kubernetes.api.model.ServicePortBuilder;
 import io.fabric8.kubernetes.api.model.authentication.TokenRequest;
 import io.fabric8.kubernetes.api.model.authentication.TokenRequestBuilder;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
@@ -38,6 +39,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -55,11 +57,15 @@ class UserProvisioningServiceTest {
         service = new UserProvisioningService();
         service.kubernetesClient = mock(KubernetesClient.class);
         service.namespacePrefix = "dev-";
+        service.provisioningMode = "namespace";
+        service.containerOnlyNamespace = "devcontainers";
         service.managedBy = "cluster-manager";
         service.labelPrefix = "cluster-manager.example.com";
         service.serviceAccountName = "dev-user";
         service.deploymentName = "devcontainer";
         service.serviceName = "devcontainer";
+        service.serviceType = "ClusterIP";
+        service.sshHost = "rp.local";
         service.kubeconfigClusterName = "k3s";
         service.kubeconfigServer = "https://k3s.example.test:6443";
         service.kubeconfigInsecureSkipTlsVerify = true;
@@ -162,6 +168,80 @@ class UserProvisioningServiceTest {
         assertEquals("dev-alice", guide.namespace());
         assertEquals("dev-user", guide.serviceAccount());
         assertEquals("kubectl -n dev-alice port-forward svc/devcontainer 2222:22", guide.portForwardCommand());
+    }
+
+    @Test
+    void getsContainerOnlyUserDetailWithNodePortEndpoint() {
+        service.provisioningMode = "container-only";
+        mockContainerOnlyUserDetailResources(
+                new ServiceAccountBuilder().withNewMetadata().withName("dev-user-alice").endMetadata().build(),
+                new DeploymentBuilder().withNewMetadata().withName("devcontainer-alice").endMetadata().build(),
+                containerOnlyService("alice", 30022)
+        );
+
+        UserDetail detail = service.getUser("alice");
+
+        assertEquals("alice", detail.userId());
+        assertEquals("devcontainers", detail.namespace());
+        assertEquals(null, detail.phase());
+        assertEquals("dev-user-alice", detail.serviceAccount());
+        assertEquals("devcontainer-alice", detail.deployment());
+        assertEquals("devcontainer-alice", detail.service());
+        assertEquals("READY", detail.status());
+        assertEquals("container-only", detail.mode());
+        assertEquals("NodePort", detail.devcontainerEndpoint().serviceType());
+        assertEquals(22, detail.devcontainerEndpoint().servicePort());
+        assertEquals(30022, detail.devcontainerEndpoint().nodePort());
+        assertEquals("ssh -p 30022 rp.local", detail.devcontainerEndpoint().sshCommand());
+    }
+
+    @Test
+    void returnsContainerOnlyConnectionGuideWithoutPortForwardCommand() {
+        service.provisioningMode = "container-only";
+        mockContainerOnlyUserDetailResources(
+                new ServiceAccountBuilder().withNewMetadata().withName("dev-user-alice").endMetadata().build(),
+                new DeploymentBuilder().withNewMetadata().withName("devcontainer-alice").endMetadata().build(),
+                containerOnlyService("alice", 30022)
+        );
+
+        com.example.me.ConnectionGuide guide = service.connectionGuide("alice");
+
+        assertEquals("devcontainers", guide.namespace());
+        assertEquals("dev-user-alice", guide.serviceAccount());
+        assertEquals(null, guide.portForwardCommand());
+        assertEquals("devcontainer-alice", guide.service());
+        assertEquals("NodePort", guide.serviceType());
+        assertEquals(22, guide.servicePort());
+        assertEquals(30022, guide.nodePort());
+        assertEquals("ssh -p 30022 rp.local", guide.sshCommand());
+    }
+
+    @Test
+    void createsContainerOnlyServiceAsNodePortInSharedNamespace() {
+        service.provisioningMode = "container-only";
+        UserProvisioningService serviceSpy = spy(service);
+        doReturn(new ProvisioningStepResult("devcontainer", "devcontainers", "completed", "DevContainer Deployment created or updated."))
+                .when(serviceSpy).ensureDevcontainer("alice");
+        serviceSpy.kubernetesClient = mock(KubernetesClient.class);
+        MixedOperation<Service, ServiceList, ServiceResource<Service>> serviceOperation = mock(MixedOperation.class);
+        MixedOperation<Service, ServiceList, ServiceResource<Service>> namespacedServices = mock(MixedOperation.class);
+        ServiceResource<Service> serviceResource = mock(ServiceResource.class);
+        when(serviceSpy.kubernetesClient.services()).thenReturn(serviceOperation);
+        when(serviceOperation.inNamespace("devcontainers")).thenReturn(namespacedServices);
+        when(namespacedServices.resource(any(Service.class))).thenReturn(serviceResource);
+
+        serviceSpy.ensureService("alice");
+
+        org.mockito.ArgumentCaptor<Service> serviceCaptor = org.mockito.ArgumentCaptor.forClass(Service.class);
+        verify(namespacedServices).resource(serviceCaptor.capture());
+        Service created = serviceCaptor.getValue();
+        assertEquals("devcontainer-alice", created.getMetadata().getName());
+        assertEquals("devcontainers", created.getMetadata().getNamespace());
+        assertEquals("alice", created.getMetadata().getLabels().get("cluster-manager.example.com/user-id"));
+        assertEquals("service", created.getMetadata().getLabels().get("cluster-manager.example.com/resource-kind"));
+        assertEquals("NodePort", created.getSpec().getType());
+        assertEquals("devcontainer-alice", created.getSpec().getSelector().get("app.kubernetes.io/name"));
+        assertEquals(22, created.getSpec().getPorts().get(0).getPort());
     }
 
     @Test
@@ -472,6 +552,59 @@ class UserProvisioningServiceTest {
         when(serviceLookup.get()).thenReturn(userService);
 
         return serviceAccountLookup;
+    }
+
+    private void mockContainerOnlyUserDetailResources(ServiceAccount serviceAccount, Deployment deployment, Service userService) {
+        service.kubernetesClient = mock(KubernetesClient.class);
+
+        serviceAccountOperation = mock(MixedOperation.class);
+        namespacedServiceAccounts = mock(MixedOperation.class);
+        ServiceAccountResource serviceAccountLookup = mock(ServiceAccountResource.class);
+        when(service.kubernetesClient.serviceAccounts()).thenReturn(serviceAccountOperation);
+        when(serviceAccountOperation.inNamespace("devcontainers")).thenReturn(namespacedServiceAccounts);
+        when(namespacedServiceAccounts.withName("dev-user-alice")).thenReturn(serviceAccountLookup);
+        when(serviceAccountLookup.get()).thenReturn(serviceAccount);
+
+        AppsAPIGroupDSL apps = mock(AppsAPIGroupDSL.class);
+        MixedOperation<Deployment, DeploymentList, RollableScalableResource<Deployment>> deploymentOperation = mock(MixedOperation.class);
+        MixedOperation<Deployment, DeploymentList, RollableScalableResource<Deployment>> namespacedDeployments = mock(MixedOperation.class);
+        RollableScalableResource<Deployment> deploymentLookup = mock(RollableScalableResource.class);
+        when(service.kubernetesClient.apps()).thenReturn(apps);
+        when(apps.deployments()).thenReturn(deploymentOperation);
+        when(deploymentOperation.inNamespace("devcontainers")).thenReturn(namespacedDeployments);
+        when(namespacedDeployments.withName("devcontainer-alice")).thenReturn(deploymentLookup);
+        when(deploymentLookup.get()).thenReturn(deployment);
+
+        MixedOperation<Service, ServiceList, ServiceResource<Service>> serviceOperation = mock(MixedOperation.class);
+        MixedOperation<Service, ServiceList, ServiceResource<Service>> namespacedServices = mock(MixedOperation.class);
+        ServiceResource<Service> serviceLookup = mock(ServiceResource.class);
+        when(service.kubernetesClient.services()).thenReturn(serviceOperation);
+        when(serviceOperation.inNamespace("devcontainers")).thenReturn(namespacedServices);
+        when(namespacedServices.withName("devcontainer-alice")).thenReturn(serviceLookup);
+        when(serviceLookup.get()).thenReturn(userService);
+    }
+
+    private Service containerOnlyService(String userId, int nodePort) {
+        return new ServiceBuilder()
+                .withNewMetadata()
+                .withName("devcontainer-" + userId)
+                .withNamespace("devcontainers")
+                .withCreationTimestamp("2026-05-23T09:00:00Z")
+                .withLabels(Map.of(
+                        "app.kubernetes.io/managed-by", "cluster-manager",
+                        "cluster-manager.example.com/resource-kind", "service",
+                        "cluster-manager.example.com/user-id", userId
+                ))
+                .endMetadata()
+                .withNewSpec()
+                .withType("NodePort")
+                .withPorts(new ServicePortBuilder()
+                        .withName("ssh")
+                        .withPort(22)
+                        .withNodePort(nodePort)
+                        .build())
+                .endSpec()
+                .build();
     }
 
     private Namespace namespaceWithDeletionTimestamp() {
