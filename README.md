@@ -74,6 +74,8 @@ Backend configuration can be passed as environment variables in the Deployment. 
 
 ```yaml
 env:
+  - name: CLUSTER_MANAGER_AUTH_MODE
+    value: "simple"
   - name: CLUSTER_MANAGER_ADMIN_USER_IDS
     value: "koba,tanaka"
   - name: CLUSTER_MANAGER_SERVICE_ACCOUNT_TOKEN_EXPIRATION_SECONDS
@@ -85,6 +87,34 @@ env:
   - name: CLUSTER_MANAGER_KUBECONFIG_INSECURE_SKIP_TLS_VERIFY
     value: "true"
 ```
+
+## Authentication
+
+`cluster-manager` can run in two authentication modes:
+
+- `simple`: the default mode. The backend reads the current user ID from the `X-User-Id` request header.
+- `keycloak`: the backend uses Quarkus OIDC bearer-token authentication and reads the user ID from the authenticated principal.
+
+Simple mode is intended for local development or deployments where another trusted component has already authenticated the request:
+
+```properties
+cluster-manager.auth.mode=simple
+quarkus.oidc.enabled=false
+```
+
+Keycloak mode example:
+
+```properties
+cluster-manager.auth.mode=keycloak
+quarkus.oidc.enabled=true
+quarkus.oidc.auth-server-url=https://keycloak.example.com/realms/dev
+quarkus.oidc.client-id=cluster-manager
+quarkus.oidc.application-type=service
+quarkus.oidc.token.principal-claim=preferred_username
+cluster-manager.admin-user-ids=alice,bob
+```
+
+When deploying with environment variables, set `CLUSTER_MANAGER_AUTH_MODE=keycloak` and the matching `QUARKUS_OIDC_*` values. Keep `cluster-manager.admin-user-ids` aligned with the Keycloak principal claim because admin APIs still use that configured allow-list.
 
 ## Provisioning modes
 
