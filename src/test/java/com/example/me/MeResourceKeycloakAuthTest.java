@@ -6,6 +6,7 @@ import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.quarkus.test.security.SecurityAttribute;
 import io.quarkus.test.security.TestSecurity;
 import org.junit.jupiter.api.Test;
 
@@ -44,6 +45,32 @@ class MeResourceKeycloakAuthTest {
                 .statusCode(200)
                 .body("userId", equalTo("alice"))
                 .body("namespace", equalTo("dev-alice"));
+
+        verify(provisioningService).getUser("alice");
+    }
+
+    @Test
+    @TestSecurity(user = "0d5ecb46-c782-42e0-9ccd-ea8cebbc13a1", attributes = {
+            @SecurityAttribute(key = "preferred_username", value = "alice")
+    })
+    void returnsCurrentUserFromPreferredUsernameClaimInKeycloakMode() {
+        when(provisioningService.getUser("alice"))
+                .thenReturn(new UserDetail(
+                        "alice",
+                        "dev-alice",
+                        "Active",
+                        "dev-user",
+                        "devcontainer",
+                        "devcontainer",
+                        "READY",
+                        "2026-05-23T09:00:00Z"
+                ));
+
+        given()
+                .when().get("/api/me")
+                .then()
+                .statusCode(200)
+                .body("userId", equalTo("alice"));
 
         verify(provisioningService).getUser("alice");
     }
