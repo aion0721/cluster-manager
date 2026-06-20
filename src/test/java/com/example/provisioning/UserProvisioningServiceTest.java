@@ -279,6 +279,31 @@ class UserProvisioningServiceTest {
     }
 
     @Test
+    void createsDevcontainerWithResolvedBaseImage() {
+        service.provisioningMode = "container-only";
+        service.environmentBaseImageCatalog = mock(EnvironmentBaseImageCatalog.class);
+        when(service.environmentBaseImageCatalog.resolveImage("node-dev")).thenReturn("node:22-bookworm");
+        UserProvisioningService serviceSpy = spy(service);
+        doReturn(new ProvisioningStepResult("rbac", "devcontainers", "completed", "RBAC created or updated."))
+                .when(serviceSpy).ensureRbac("alice");
+        serviceSpy.kubernetesClient = mock(KubernetesClient.class);
+        AppsAPIGroupDSL apps = mock(AppsAPIGroupDSL.class);
+        MixedOperation<Deployment, DeploymentList, RollableScalableResource<Deployment>> deploymentOperation = mock(MixedOperation.class);
+        MixedOperation<Deployment, DeploymentList, RollableScalableResource<Deployment>> namespacedDeployments = mock(MixedOperation.class);
+        RollableScalableResource<Deployment> deploymentResource = mock(RollableScalableResource.class);
+        when(serviceSpy.kubernetesClient.apps()).thenReturn(apps);
+        when(apps.deployments()).thenReturn(deploymentOperation);
+        when(deploymentOperation.inNamespace("devcontainers")).thenReturn(namespacedDeployments);
+        when(namespacedDeployments.resource(any(Deployment.class))).thenReturn(deploymentResource);
+
+        serviceSpy.ensureDevcontainer("alice", "node-dev");
+
+        org.mockito.ArgumentCaptor<Deployment> deploymentCaptor = org.mockito.ArgumentCaptor.forClass(Deployment.class);
+        verify(namespacedDeployments).resource(deploymentCaptor.capture());
+        assertEquals("node:22-bookworm", deploymentCaptor.getValue().getSpec().getTemplate().getSpec().getContainers().get(0).getImage());
+    }
+
+    @Test
     void createsServiceAccountTokenWithoutPersistingIt() {
         ServiceAccountResource serviceAccountLookup = mockUserDetailResources(
                 namespaceWithLabels(Map.of(

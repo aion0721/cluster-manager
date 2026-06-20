@@ -44,6 +44,9 @@ public class UserProvisioningService {
     @Inject
     KubernetesClient kubernetesClient;
 
+    @Inject
+    EnvironmentBaseImageCatalog environmentBaseImageCatalog;
+
     @ConfigProperty(name = "cluster-manager.namespace-prefix")
     String namespacePrefix;
 
@@ -300,10 +303,14 @@ public class UserProvisioningService {
     }
 
     public UserProvisioningResult provisionEnvironment(String userId) {
+        return provisionEnvironment(userId, null);
+    }
+
+    public UserProvisioningResult provisionEnvironment(String userId, String baseImageId) {
         validateUserId(userId);
 
         List<ProvisioningStepResult> results = new ArrayList<>();
-        results.add(ensureDevcontainer(userId));
+        results.add(ensureDevcontainer(userId, baseImageId));
         results.add(ensureService(userId));
 
         return new UserProvisioningResult(userId, workloadNamespace(userId), results);
@@ -410,9 +417,16 @@ public class UserProvisioningService {
     }
 
     public ProvisioningStepResult ensureDevcontainer(String userId) {
+        return ensureDevcontainer(userId, null);
+    }
+
+    public ProvisioningStepResult ensureDevcontainer(String userId, String baseImageId) {
         validateUserId(userId);
         String namespaceName = workloadNamespace(userId);
         ensureRbac(userId);
+        String containerImage = environmentBaseImageCatalog == null
+                ? devcontainerImage
+                : environmentBaseImageCatalog.resolveImage(baseImageId);
 
         Map<String, String> selectorLabels = devcontainerLabels(userId);
         kubernetesClient.apps().deployments()
@@ -436,7 +450,7 @@ public class UserProvisioningService {
                                         .withServiceAccountName(serviceAccountName(userId))
                                         .withContainers(new ContainerBuilder()
                                                 .withName(deploymentName)
-                                                .withImage(devcontainerImage)
+                                                .withImage(containerImage)
                                                 .withCommand("sleep")
                                                 .withArgs("infinity")
                                                 .build())

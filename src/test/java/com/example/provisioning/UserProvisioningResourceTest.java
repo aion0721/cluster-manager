@@ -204,7 +204,7 @@ class UserProvisioningResourceTest {
 
     @Test
     void createsEnvironmentForExistingUser() {
-        when(provisioningService.provisionEnvironment("alice"))
+        when(provisioningService.provisionEnvironment("alice", "node-dev"))
                 .thenReturn(new UserProvisioningResult("alice", "dev-alice", List.of(
                         new ProvisioningStepResult("devcontainer", "dev-alice", "completed", "DevContainer Deployment created or updated."),
                         new ProvisioningStepResult("service", "dev-alice", "completed", "DevContainer Service created or updated.")
@@ -212,6 +212,8 @@ class UserProvisioningResourceTest {
 
         given()
                 .header("X-User-Id", "alice")
+                .contentType("application/json")
+                .body("{\"baseImage\":\"node-dev\"}")
                 .when().post("/api/users/alice/environment")
                 .then()
                 .statusCode(200)
@@ -219,7 +221,7 @@ class UserProvisioningResourceTest {
                 .body("steps.size()", equalTo(2))
                 .body("steps[0].key", equalTo("devcontainer"));
 
-        verify(provisioningService).provisionEnvironment("alice");
+        verify(provisioningService).provisionEnvironment("alice", "node-dev");
     }
 
     @Test

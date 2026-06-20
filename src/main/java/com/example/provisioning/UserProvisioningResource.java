@@ -87,8 +87,9 @@ public class UserProvisioningResource {
 
     @POST
     @Path("/{userId}/environment")
-    public UserProvisioningResult environment(@PathParam("userId") String userId) {
-        return provisioningService.provisionEnvironment(userId);
+    @Consumes(MediaType.APPLICATION_JSON)
+    public UserProvisioningResult environment(@PathParam("userId") String userId, CreateEnvironmentRequest request) {
+        return provisioningService.provisionEnvironment(userId, request == null ? null : request.baseImage());
     }
 
     @DELETE
