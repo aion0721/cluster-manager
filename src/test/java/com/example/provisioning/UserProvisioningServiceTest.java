@@ -10,6 +10,7 @@ import io.fabric8.kubernetes.api.model.ServiceAccount;
 import io.fabric8.kubernetes.api.model.ServiceAccountList;
 import io.fabric8.kubernetes.api.model.ServiceBuilder;
 import io.fabric8.kubernetes.api.model.ServiceList;
+import io.fabric8.kubernetes.api.model.ServiceListBuilder;
 import io.fabric8.kubernetes.api.model.ServicePortBuilder;
 import io.fabric8.kubernetes.api.model.authentication.TokenRequest;
 import io.fabric8.kubernetes.api.model.authentication.TokenRequestBuilder;
@@ -453,6 +454,27 @@ class UserProvisioningServiceTest {
         assertEquals("Active", users.get(0).phase());
         assertEquals("bob", users.get(1).userId());
         assertEquals("dev-bob", users.get(1).namespace());
+    }
+
+    @Test
+    void trimsContainerOnlyNamespaceConfigurationWhenListingUsers() {
+        service.provisioningMode = " container-only ";
+        service.containerOnlyNamespace = " devcontainers ";
+        service.kubernetesClient = mock(KubernetesClient.class);
+        MixedOperation<Service, ServiceList, ServiceResource<Service>> serviceOperation = mock(MixedOperation.class);
+        MixedOperation<Service, ServiceList, ServiceResource<Service>> namespacedServices = mock(MixedOperation.class);
+        when(service.kubernetesClient.services()).thenReturn(serviceOperation);
+        when(serviceOperation.inNamespace("devcontainers")).thenReturn(namespacedServices);
+        when(namespacedServices.list()).thenReturn(new ServiceListBuilder()
+                .addToItems(containerOnlyService("alice", 30022))
+                .build());
+
+        List<UserSummary> users = service.listUsers();
+
+        assertEquals(1, users.size());
+        assertEquals("alice", users.get(0).userId());
+        assertEquals("devcontainers", users.get(0).namespace());
+        verify(serviceOperation).inNamespace("devcontainers");
     }
 
     @Test

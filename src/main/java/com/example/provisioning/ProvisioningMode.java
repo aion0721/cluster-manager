@@ -17,8 +17,9 @@ public enum ProvisioningMode {
     }
 
     public static ProvisioningMode fromConfig(String value) {
+        String normalizedValue = value.trim();
         for (ProvisioningMode mode : values()) {
-            if (mode.configValue.equalsIgnoreCase(value)) {
+            if (mode.configValue.equalsIgnoreCase(normalizedValue)) {
                 return mode;
             }
         }

@@ -92,7 +92,7 @@ public class UserProvisioningService {
     public List<UserSummary> listUsers() {
         if (mode() == ProvisioningMode.CONTAINER_ONLY) {
             return kubernetesClient.services()
-                    .inNamespace(containerOnlyNamespace)
+                    .inNamespace(containerOnlyNamespace())
                     .list()
                     .getItems()
                     .stream()
@@ -509,7 +509,11 @@ public class UserProvisioningService {
     }
 
     private String workloadNamespace(String userId) {
-        return mode() == ProvisioningMode.NAMESPACE ? namespaceName(userId) : containerOnlyNamespace;
+        return mode() == ProvisioningMode.NAMESPACE ? namespaceName(userId) : containerOnlyNamespace();
+    }
+
+    private String containerOnlyNamespace() {
+        return containerOnlyNamespace.trim();
     }
 
     private ProvisioningMode mode() {
