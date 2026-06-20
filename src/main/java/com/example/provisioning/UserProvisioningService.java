@@ -311,7 +311,7 @@ public class UserProvisioningService {
 
         List<ProvisioningStepResult> results = new ArrayList<>();
         results.add(ensureDevcontainer(userId, baseImageId));
-        results.add(ensureService(userId));
+        results.add(ensureService(userId, false));
 
         return new UserProvisioningResult(userId, workloadNamespace(userId), results);
     }
@@ -366,7 +366,7 @@ public class UserProvisioningService {
                                  .withName(serviceAccountName(userId))
                                  .withNamespace(namespaceName)
                                  .withLabels(userResourceLabels(userId, "service-account"))
-                                 .withAnnotations(userAnnotations(userId, displayName))
+                                 .withAnnotations(serviceAccountAnnotations(namespaceName, userId, displayName))
                                  .build())
                          .build())
                 .createOrReplace();
@@ -464,9 +464,15 @@ public class UserProvisioningService {
     }
 
     public ProvisioningStepResult ensureService(String userId) {
+        return ensureService(userId, true);
+    }
+
+    private ProvisioningStepResult ensureService(String userId, boolean ensureDevcontainer) {
         validateUserId(userId);
         String namespaceName = workloadNamespace(userId);
-        ensureDevcontainer(userId);
+        if (ensureDevcontainer) {
+            ensureDevcontainer(userId);
+        }
 
         kubernetesClient.services()
                 .inNamespace(namespaceName)
@@ -825,6 +831,23 @@ public class UserProvisioningService {
         annotations.put(labelPrefix + "/user-id", userId);
         if (displayName != null && !displayName.isBlank()) {
             annotations.put(labelPrefix + "/display-name", displayName.trim());
+        }
+        return annotations;
+    }
+
+    private Map<String, String> serviceAccountAnnotations(String namespaceName, String userId, String displayName) {
+        Map<String, String> annotations = userAnnotations(userId, displayName);
+        if (displayName == null || displayName.isBlank()) {
+            ServiceAccount existing = kubernetesClient.serviceAccounts()
+                    .inNamespace(namespaceName)
+                    .withName(serviceAccountName(userId))
+                    .get();
+            if (existing != null && existing.getMetadata().getAnnotations() != null) {
+                String existingDisplayName = existing.getMetadata().getAnnotations().get(labelPrefix + "/display-name");
+                if (existingDisplayName != null && !existingDisplayName.isBlank()) {
+                    annotations.put(labelPrefix + "/display-name", existingDisplayName);
+                }
+            }
         }
         return annotations;
     }

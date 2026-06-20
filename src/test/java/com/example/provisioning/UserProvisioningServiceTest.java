@@ -304,6 +304,51 @@ class UserProvisioningServiceTest {
     }
 
     @Test
+    void provisionEnvironmentDoesNotRecreateDevcontainerWithDefaultImage() {
+        service.provisioningMode = "container-only";
+        UserProvisioningService serviceSpy = spy(service);
+        doReturn(new ProvisioningStepResult("devcontainer", "devcontainers", "completed", "DevContainer Deployment created or updated."))
+                .when(serviceSpy).ensureDevcontainer("alice", "node-dev");
+        serviceSpy.kubernetesClient = mock(KubernetesClient.class);
+        MixedOperation<Service, ServiceList, ServiceResource<Service>> serviceOperation = mock(MixedOperation.class);
+        MixedOperation<Service, ServiceList, ServiceResource<Service>> namespacedServices = mock(MixedOperation.class);
+        ServiceResource<Service> serviceResource = mock(ServiceResource.class);
+        when(serviceSpy.kubernetesClient.services()).thenReturn(serviceOperation);
+        when(serviceOperation.inNamespace("devcontainers")).thenReturn(namespacedServices);
+        when(namespacedServices.resource(any(Service.class))).thenReturn(serviceResource);
+
+        serviceSpy.provisionEnvironment("alice", "node-dev");
+
+        verify(serviceSpy).ensureDevcontainer("alice", "node-dev");
+        verify(serviceSpy, never()).ensureDevcontainer("alice");
+    }
+
+    @Test
+    void preservesDisplayNameAnnotationWhenRefreshingServiceAccount() {
+        service.provisioningMode = "container-only";
+        service.kubernetesClient = mock(KubernetesClient.class);
+        serviceAccountOperation = mock(MixedOperation.class);
+        namespacedServiceAccounts = mock(MixedOperation.class);
+        ServiceAccountResource serviceAccountLookup = mock(ServiceAccountResource.class);
+        when(service.kubernetesClient.serviceAccounts()).thenReturn(serviceAccountOperation);
+        when(serviceAccountOperation.inNamespace("devcontainers")).thenReturn(namespacedServiceAccounts);
+        when(namespacedServiceAccounts.withName("dev-user-alice")).thenReturn(serviceAccountLookup);
+        when(serviceAccountLookup.get()).thenReturn(new ServiceAccountBuilder()
+                .withNewMetadata()
+                .withName("dev-user-alice")
+                .withAnnotations(Map.of("cluster-manager.example.com/display-name", "Alice Doe"))
+                .endMetadata()
+                .build());
+        when(namespacedServiceAccounts.resource(any(ServiceAccount.class))).thenReturn(serviceAccountLookup);
+
+        service.ensureServiceAccount("alice");
+
+        org.mockito.ArgumentCaptor<ServiceAccount> serviceAccountCaptor = org.mockito.ArgumentCaptor.forClass(ServiceAccount.class);
+        verify(namespacedServiceAccounts).resource(serviceAccountCaptor.capture());
+        assertEquals("Alice Doe", serviceAccountCaptor.getValue().getMetadata().getAnnotations().get("cluster-manager.example.com/display-name"));
+    }
+
+    @Test
     void createsServiceAccountTokenWithoutPersistingIt() {
         ServiceAccountResource serviceAccountLookup = mockUserDetailResources(
                 namespaceWithLabels(Map.of(
