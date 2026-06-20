@@ -25,6 +25,13 @@ class ProvisioningStepsResourceTest {
                         "devcontainer",
                         "service"
                 ))
+                .body("group", contains(
+                        "users",
+                        "users",
+                        "users",
+                        "pods",
+                        "pods"
+                ))
                 .body("method", contains("POST", "POST", "POST", "POST", "POST"))
                 .body("endpointTemplate", contains(
                         "/api/users/{userId}/namespace",

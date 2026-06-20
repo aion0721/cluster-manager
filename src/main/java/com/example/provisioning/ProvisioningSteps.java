@@ -6,6 +6,7 @@ public final class ProvisioningSteps {
 
     private static final ProvisioningStep NAMESPACE_STEP = new ProvisioningStep(
             "namespace",
+            "users",
             "Namespace",
             "Create or update the user's Kubernetes Namespace.",
             "POST",
@@ -38,6 +39,7 @@ public final class ProvisioningSteps {
     private static ProvisioningStep serviceAccountStep(int order) {
         return new ProvisioningStep(
                 "serviceAccount",
+                "users",
                 "ServiceAccount",
                 "Create or update the ServiceAccount used by the user's DevContainer.",
                 "POST",
@@ -49,6 +51,7 @@ public final class ProvisioningSteps {
     private static ProvisioningStep rbacStep(int order) {
         return new ProvisioningStep(
                 "rbac",
+                "users",
                 "RBAC",
                 "Create or update namespace-scoped RBAC for the user's ServiceAccount.",
                 "POST",
@@ -60,6 +63,7 @@ public final class ProvisioningSteps {
     private static ProvisioningStep devcontainerStep(int order) {
         return new ProvisioningStep(
                 "devcontainer",
+                "pods",
                 "DevContainer",
                 "Create or update the user's DevContainer Deployment.",
                 "POST",
@@ -71,6 +75,7 @@ public final class ProvisioningSteps {
     private static ProvisioningStep serviceStep(int order) {
         return new ProvisioningStep(
                 "service",
+                "pods",
                 "Service",
                 "Create or update the Service for the user's DevContainer.",
                 "POST",

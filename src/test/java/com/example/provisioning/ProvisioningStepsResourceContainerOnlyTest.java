@@ -31,6 +31,12 @@ class ProvisioningStepsResourceContainerOnlyTest {
                         "devcontainer",
                         "service"
                 ))
+                .body("group", contains(
+                        "users",
+                        "users",
+                        "pods",
+                        "pods"
+                ))
                 .body("key", not(hasItem("namespace")))
                 .body("order", contains(1, 2, 3, 4));
     }

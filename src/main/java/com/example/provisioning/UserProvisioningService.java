@@ -91,13 +91,13 @@ public class UserProvisioningService {
 
     public List<UserSummary> listUsers() {
         if (mode() == ProvisioningMode.CONTAINER_ONLY) {
-            return kubernetesClient.services()
+            return kubernetesClient.serviceAccounts()
                     .inNamespace(containerOnlyNamespace())
                     .list()
                     .getItems()
                     .stream()
-                    .filter(this::isManagedUserService)
-                    .map(this::toContainerOnlyUserSummary)
+                    .filter(this::isManagedUserServiceAccount)
+                    .map(serviceAccount -> toUserSummary(getUser(serviceAccount.getMetadata().getLabels().get(labelPrefix + "/user-id"))))
                     .sorted(Comparator.comparing(UserSummary::namespace).thenComparing(UserSummary::userId))
                     .toList();
         }
@@ -107,7 +107,7 @@ public class UserProvisioningService {
                 .getItems()
                 .stream()
                 .filter(this::isManagedUserNamespace)
-                .map(this::toUserSummary)
+                .map(namespace -> toUserSummary(getUser(namespace.getMetadata().getLabels().get(labelPrefix + "/user-id"))))
                 .sorted(Comparator.comparing(UserSummary::namespace))
                 .toList();
     }
@@ -117,7 +117,19 @@ public class UserProvisioningService {
         String namespaceName = workloadNamespace(userId);
         Namespace namespace = mode() == ProvisioningMode.NAMESPACE ? getManagedNamespace(userId) : null;
 
-        boolean serviceAccountExists = kubernetesClient.serviceAccounts()
+        ServiceAccount userServiceAccount = kubernetesClient.serviceAccounts()
+                .inNamespace(namespaceName)
+                .withName(serviceAccountName(userId))
+                .get();
+        if (mode() == ProvisioningMode.CONTAINER_ONLY && userServiceAccount != null) {
+            assertManagedUserServiceAccount(userServiceAccount, userId);
+        }
+        boolean serviceAccountExists = userServiceAccount != null;
+        boolean roleExists = kubernetesClient.rbac().roles()
+                .inNamespace(namespaceName)
+                .withName(serviceAccountName(userId))
+                .get() != null;
+        boolean roleBindingExists = kubernetesClient.rbac().roleBindings()
                 .inNamespace(namespaceName)
                 .withName(serviceAccountName(userId))
                 .get() != null;
@@ -133,18 +145,19 @@ public class UserProvisioningService {
             assertManagedUserService(userService, userId);
         }
         boolean serviceExists = userService != null;
-        if (mode() == ProvisioningMode.CONTAINER_ONLY && !serviceAccountExists && !deploymentExists && !serviceExists) {
-            throw new NotFoundException("DevContainer assignment not found for userId: " + userId);
+        if (mode() == ProvisioningMode.CONTAINER_ONLY && !serviceAccountExists && !roleExists && !roleBindingExists) {
+            throw new NotFoundException("User not found for userId: " + userId);
         }
 
         return new UserDetail(
                 userId,
+                displayName(namespace, userServiceAccount),
                 namespaceName,
                 namespace == null || namespace.getStatus() == null ? null : namespace.getStatus().getPhase(),
                 serviceAccountExists ? serviceAccountName(userId) : null,
                 deploymentExists ? deploymentName(userId) : null,
                 serviceExists ? serviceName(userId) : null,
-                userStatus(namespace, serviceAccountExists, deploymentExists, serviceExists),
+                userStatus(namespace, serviceAccountExists, roleExists, roleBindingExists, deploymentExists, serviceExists),
                 createdAt(namespace, userService),
                 mode().configValue(),
                 endpoint(userService)
@@ -273,7 +286,34 @@ public class UserProvisioningService {
         return new UserProvisioningResult(userId, workloadNamespace(userId), results);
     }
 
+    public UserProvisioningResult provisionUser(String userId, String displayName) {
+        validateUserId(userId);
+
+        List<ProvisioningStepResult> results = new ArrayList<>();
+        if (mode() == ProvisioningMode.NAMESPACE) {
+            results.add(ensureNamespace(userId, displayName));
+        }
+        results.add(ensureServiceAccount(userId, displayName));
+        results.add(ensureRbac(userId));
+
+        return new UserProvisioningResult(userId, workloadNamespace(userId), results);
+    }
+
+    public UserProvisioningResult provisionEnvironment(String userId) {
+        validateUserId(userId);
+
+        List<ProvisioningStepResult> results = new ArrayList<>();
+        results.add(ensureDevcontainer(userId));
+        results.add(ensureService(userId));
+
+        return new UserProvisioningResult(userId, workloadNamespace(userId), results);
+    }
+
     public ProvisioningStepResult ensureNamespace(String userId) {
+        return ensureNamespace(userId, null);
+    }
+
+    public ProvisioningStepResult ensureNamespace(String userId, String displayName) {
         validateUserId(userId);
         String namespaceName = namespaceName(userId);
         if (mode() != ProvisioningMode.NAMESPACE) {
@@ -284,24 +324,28 @@ public class UserProvisioningService {
         if (existing == null) {
             kubernetesClient.namespaces().resource(new NamespaceBuilder()
                     .withMetadata(new ObjectMetaBuilder()
-                            .withName(namespaceName)
-                            .withLabels(namespaceLabels(userId))
-                            .withAnnotations(namespaceAnnotations(userId))
-                            .build())
-                    .build()).create();
+                             .withName(namespaceName)
+                             .withLabels(namespaceLabels(userId))
+                             .withAnnotations(namespaceAnnotations(userId, displayName))
+                             .build())
+                     .build()).create();
             return completed("namespace", namespaceName, "Namespace created or updated.");
         }
 
         kubernetesClient.namespaces().resource(new NamespaceBuilder(existing)
                 .editMetadata()
                 .addToLabels(namespaceLabels(userId))
-                .addToAnnotations(namespaceAnnotations(userId))
+                .addToAnnotations(namespaceAnnotations(userId, displayName))
                 .endMetadata()
                 .build()).update();
         return completed("namespace", namespaceName, "Namespace created or updated.");
     }
 
     public ProvisioningStepResult ensureServiceAccount(String userId) {
+        return ensureServiceAccount(userId, null);
+    }
+
+    public ProvisioningStepResult ensureServiceAccount(String userId, String displayName) {
         validateUserId(userId);
         String namespaceName = workloadNamespace(userId);
         if (mode() == ProvisioningMode.NAMESPACE) {
@@ -311,12 +355,13 @@ public class UserProvisioningService {
         kubernetesClient.serviceAccounts()
                 .inNamespace(namespaceName)
                 .resource(new ServiceAccountBuilder()
-                        .withMetadata(new ObjectMetaBuilder()
-                                .withName(serviceAccountName(userId))
-                                .withNamespace(namespaceName)
-                                .withLabels(userResourceLabels(userId, "service-account"))
-                                .build())
-                        .build())
+                         .withMetadata(new ObjectMetaBuilder()
+                                 .withName(serviceAccountName(userId))
+                                 .withNamespace(namespaceName)
+                                 .withLabels(userResourceLabels(userId, "service-account"))
+                                 .withAnnotations(userAnnotations(userId, displayName))
+                                 .build())
+                         .build())
                 .createOrReplace();
 
         return completed("serviceAccount", namespaceName, "ServiceAccount created or updated.");
@@ -432,13 +477,71 @@ public class UserProvisioningService {
         return completed("service", namespaceName, "DevContainer Service created or updated.");
     }
 
-    public UserDeletionResult deleteUser(String userId) {
+    public UserDeletionResult deleteEnvironment(String userId) {
         validateUserId(userId);
-        String namespaceName = namespaceName(userId);
-        if (mode() != ProvisioningMode.NAMESPACE) {
-            throw new BadRequestException("Delete user is available only in namespace mode.");
+        String namespaceName = workloadNamespace(userId);
+        if (mode() == ProvisioningMode.NAMESPACE) {
+            getManagedNamespace(userId);
+        } else {
+            ServiceAccount userServiceAccount = kubernetesClient.serviceAccounts()
+                    .inNamespace(namespaceName)
+                    .withName(serviceAccountName(userId))
+                    .get();
+            if (userServiceAccount == null) {
+                throw new NotFoundException("User not found for userId: " + userId);
+            }
+            assertManagedUserServiceAccount(userServiceAccount, userId);
         }
 
+        kubernetesClient.services()
+                .inNamespace(namespaceName)
+                .withName(serviceName(userId))
+                .delete();
+        kubernetesClient.apps().deployments()
+                .inNamespace(namespaceName)
+                .withName(deploymentName(userId))
+                .delete();
+
+        return new UserDeletionResult(userId, namespaceName, "DELETED");
+    }
+
+    public UserDeletionResult deleteUser(String userId) {
+        validateUserId(userId);
+        String namespaceName = workloadNamespace(userId);
+
+        if (mode() == ProvisioningMode.CONTAINER_ONLY) {
+            ServiceAccount userServiceAccount = kubernetesClient.serviceAccounts()
+                    .inNamespace(namespaceName)
+                    .withName(serviceAccountName(userId))
+                    .get();
+            if (userServiceAccount == null) {
+                throw new NotFoundException("User not found for userId: " + userId);
+            }
+            assertManagedUserServiceAccount(userServiceAccount, userId);
+            kubernetesClient.services()
+                    .inNamespace(namespaceName)
+                    .withName(serviceName(userId))
+                    .delete();
+            kubernetesClient.apps().deployments()
+                    .inNamespace(namespaceName)
+                    .withName(deploymentName(userId))
+                    .delete();
+            kubernetesClient.rbac().roleBindings()
+                    .inNamespace(namespaceName)
+                    .withName(serviceAccountName(userId))
+                    .delete();
+            kubernetesClient.rbac().roles()
+                    .inNamespace(namespaceName)
+                    .withName(serviceAccountName(userId))
+                    .delete();
+            kubernetesClient.serviceAccounts()
+                    .inNamespace(namespaceName)
+                    .withName(serviceAccountName(userId))
+                    .delete();
+            return new UserDeletionResult(userId, namespaceName, "DELETED");
+        }
+
+        namespaceName = namespaceName(userId);
         Namespace namespace = kubernetesClient.namespaces().withName(namespaceName).get();
         if (namespace == null) {
             throw new NotFoundException("Namespace not found: " + namespaceName);
@@ -462,16 +565,21 @@ public class UserProvisioningService {
                 && labels.containsKey(labelPrefix + "/user-id");
     }
 
-    private UserSummary toUserSummary(Namespace namespace) {
-        Map<String, String> labels = namespace.getMetadata().getLabels();
-        Map<String, String> annotations = namespace.getMetadata().getAnnotations();
-        String phase = namespace.getStatus() == null ? null : namespace.getStatus().getPhase();
+    private UserSummary toUserSummary(UserDetail detail) {
         return new UserSummary(
-                labels.get(labelPrefix + "/user-id"),
-                namespace.getMetadata().getName(),
-                phase,
-                labels == null ? Map.of() : Map.copyOf(labels),
-                annotations == null ? Map.of() : Map.copyOf(annotations)
+                detail.userId(),
+                detail.displayName(),
+                detail.namespace(),
+                detail.phase(),
+                detail.serviceAccount(),
+                detail.deployment(),
+                detail.service(),
+                detail.status(),
+                detail.createdAt(),
+                detail.mode(),
+                detail.devcontainerEndpoint(),
+                Map.of(),
+                Map.of()
         );
     }
 
@@ -494,9 +602,24 @@ public class UserProvisioningService {
         }
     }
 
-    private String userStatus(Namespace namespace, boolean serviceAccountExists, boolean deploymentExists, boolean serviceExists) {
+    private String userStatus(
+            Namespace namespace,
+            boolean serviceAccountExists,
+            boolean roleExists,
+            boolean roleBindingExists,
+            boolean deploymentExists,
+            boolean serviceExists
+    ) {
         if (namespace != null && namespace.getMetadata().getDeletionTimestamp() != null) {
             return "DELETING";
+        }
+        boolean userReady = serviceAccountExists && roleExists && roleBindingExists;
+        boolean environmentReady = deploymentExists && serviceExists;
+        if (userReady && !deploymentExists && !serviceExists) {
+            return "USER_READY";
+        }
+        if (userReady && environmentReady) {
+            return "READY";
         }
         if (serviceAccountExists && deploymentExists && serviceExists) {
             return "READY";
@@ -576,6 +699,24 @@ public class UserProvisioningService {
                 && labels.containsKey(labelPrefix + "/user-id");
     }
 
+    private boolean isManagedUserServiceAccount(ServiceAccount serviceAccount) {
+        Map<String, String> labels = serviceAccount.getMetadata().getLabels();
+        return labels != null
+                && managedBy.equals(labels.get("app.kubernetes.io/managed-by"))
+                && "service-account".equals(labels.get(labelPrefix + "/resource-kind"))
+                && labels.containsKey(labelPrefix + "/user-id");
+    }
+
+    private void assertManagedUserServiceAccount(ServiceAccount serviceAccount, String userId) {
+        Map<String, String> labels = serviceAccount.getMetadata().getLabels();
+        if (labels == null
+                || !managedBy.equals(labels.get("app.kubernetes.io/managed-by"))
+                || !"service-account".equals(labels.get(labelPrefix + "/resource-kind"))
+                || !userId.equals(labels.get(labelPrefix + "/user-id"))) {
+            throw new ForbiddenException("ServiceAccount is not managed by cluster-manager for userId: " + userId);
+        }
+    }
+
     private void assertManagedUserService(Service service, String userId) {
         Map<String, String> labels = service.getMetadata().getLabels();
         if (labels == null
@@ -586,23 +727,21 @@ public class UserProvisioningService {
         }
     }
 
-    private UserSummary toContainerOnlyUserSummary(Service service) {
-        Map<String, String> labels = service.getMetadata().getLabels();
-        Map<String, String> annotations = service.getMetadata().getAnnotations();
-        return new UserSummary(
-                labels.get(labelPrefix + "/user-id"),
-                service.getMetadata().getNamespace(),
-                null,
-                labels == null ? Map.of() : Map.copyOf(labels),
-                annotations == null ? Map.of() : Map.copyOf(annotations)
-        );
-    }
-
     private String createdAt(Namespace namespace, Service service) {
         if (namespace != null) {
             return namespace.getMetadata().getCreationTimestamp();
         }
         return service == null ? null : service.getMetadata().getCreationTimestamp();
+    }
+
+    private String displayName(Namespace namespace, ServiceAccount serviceAccount) {
+        Map<String, String> annotations = namespace != null
+                ? namespace.getMetadata().getAnnotations()
+                : serviceAccount == null ? null : serviceAccount.getMetadata().getAnnotations();
+        if (annotations == null) {
+            return null;
+        }
+        return annotations.get(labelPrefix + "/display-name");
     }
 
     private DevcontainerEndpoint endpoint(Service service) {
@@ -658,9 +797,21 @@ public class UserProvisioningService {
         return labels;
     }
 
-    private Map<String, String> namespaceAnnotations(String userId) {
+    private Map<String, String> namespaceAnnotations(String userId, String displayName) {
         Map<String, String> annotations = new LinkedHashMap<>();
         annotations.put(labelPrefix + "/user-id", userId);
+        if (displayName != null && !displayName.isBlank()) {
+            annotations.put(labelPrefix + "/display-name", displayName.trim());
+        }
+        return annotations;
+    }
+
+    private Map<String, String> userAnnotations(String userId, String displayName) {
+        Map<String, String> annotations = new LinkedHashMap<>();
+        annotations.put(labelPrefix + "/user-id", userId);
+        if (displayName != null && !displayName.isBlank()) {
+            annotations.put(labelPrefix + "/display-name", displayName.trim());
+        }
         return annotations;
     }
 

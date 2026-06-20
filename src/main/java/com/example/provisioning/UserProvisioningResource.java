@@ -1,6 +1,7 @@
 package com.example.provisioning;
 
 import com.example.security.AdminRequired;
+import com.example.me.ConnectionGuide;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
@@ -39,7 +40,7 @@ public class UserProvisioningResource {
         if (request == null) {
             throw new BadRequestException("request body is required");
         }
-        return provisioningService.provision(request.userId());
+        return provisioningService.provisionUser(request.userId(), request.displayName());
     }
 
     @POST
@@ -76,6 +77,24 @@ public class UserProvisioningResource {
     @Path("/{userId}/reconcile")
     public UserProvisioningResult reconcile(@PathParam("userId") String userId) {
         return provisioningService.provision(userId);
+    }
+
+    @GET
+    @Path("/{userId}/port-forward-command")
+    public ConnectionGuide portForwardCommand(@PathParam("userId") String userId) {
+        return provisioningService.connectionGuide(userId);
+    }
+
+    @POST
+    @Path("/{userId}/environment")
+    public UserProvisioningResult environment(@PathParam("userId") String userId) {
+        return provisioningService.provisionEnvironment(userId);
+    }
+
+    @DELETE
+    @Path("/{userId}/environment")
+    public UserDeletionResult deleteEnvironment(@PathParam("userId") String userId) {
+        return provisioningService.deleteEnvironment(userId);
     }
 
     @DELETE

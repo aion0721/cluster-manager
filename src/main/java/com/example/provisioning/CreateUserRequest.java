@@ -1,4 +1,4 @@
 package com.example.provisioning;
 
-public record CreateUserRequest(String userId) {
+public record CreateUserRequest(String userId, String displayName) {
 }

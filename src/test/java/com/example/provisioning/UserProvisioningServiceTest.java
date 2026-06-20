@@ -7,19 +7,24 @@ import io.fabric8.kubernetes.api.model.NamespaceListBuilder;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServiceAccountBuilder;
 import io.fabric8.kubernetes.api.model.ServiceAccount;
+import io.fabric8.kubernetes.api.model.ServiceAccountListBuilder;
 import io.fabric8.kubernetes.api.model.ServiceAccountList;
 import io.fabric8.kubernetes.api.model.ServiceBuilder;
 import io.fabric8.kubernetes.api.model.ServiceList;
-import io.fabric8.kubernetes.api.model.ServiceListBuilder;
 import io.fabric8.kubernetes.api.model.ServicePortBuilder;
 import io.fabric8.kubernetes.api.model.authentication.TokenRequest;
 import io.fabric8.kubernetes.api.model.authentication.TokenRequestBuilder;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.apps.DeploymentBuilder;
 import io.fabric8.kubernetes.api.model.apps.DeploymentList;
+import io.fabric8.kubernetes.api.model.rbac.Role;
+import io.fabric8.kubernetes.api.model.rbac.RoleBinding;
+import io.fabric8.kubernetes.api.model.rbac.RoleBindingList;
+import io.fabric8.kubernetes.api.model.rbac.RoleList;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.dsl.AppsAPIGroupDSL;
 import io.fabric8.kubernetes.client.dsl.MixedOperation;
+import io.fabric8.kubernetes.client.dsl.RbacAPIGroupDSL;
 import io.fabric8.kubernetes.client.dsl.Resource;
 import io.fabric8.kubernetes.client.dsl.RollableScalableResource;
 import io.fabric8.kubernetes.client.dsl.ServiceAccountResource;
@@ -102,7 +107,7 @@ class UserProvisioningServiceTest {
     }
 
     @Test
-    void getsPartialUserDetailWhenSomeResourcesAreMissing() {
+    void getsUserReadyDetailWhenEnvironmentIsMissing() {
         mockUserDetailResources(
                 namespaceWithLabels(Map.of(
                         "app.kubernetes.io/managed-by", "cluster-manager",
@@ -118,7 +123,7 @@ class UserProvisioningServiceTest {
         assertEquals("dev-user", detail.serviceAccount());
         assertEquals(null, detail.deployment());
         assertEquals(null, detail.service());
-        assertEquals("PARTIAL", detail.status());
+        assertEquals("USER_READY", detail.status());
     }
 
     @Test
@@ -175,7 +180,7 @@ class UserProvisioningServiceTest {
     void getsContainerOnlyUserDetailWithNodePortEndpoint() {
         service.provisioningMode = "container-only";
         mockContainerOnlyUserDetailResources(
-                new ServiceAccountBuilder().withNewMetadata().withName("dev-user-alice").endMetadata().build(),
+                containerOnlyServiceAccount("alice"),
                 new DeploymentBuilder().withNewMetadata().withName("devcontainer-alice").endMetadata().build(),
                 containerOnlyService("alice", 30022)
         );
@@ -197,10 +202,38 @@ class UserProvisioningServiceTest {
     }
 
     @Test
+    void getsContainerOnlyUserDetailWithoutEnvironment() {
+        service.provisioningMode = "container-only";
+        mockContainerOnlyUserDetailResources(
+                containerOnlyServiceAccount("alice"),
+                null,
+                null
+        );
+
+        UserDetail detail = service.getUser("alice");
+
+        assertEquals("alice", detail.userId());
+        assertEquals("devcontainers", detail.namespace());
+        assertEquals("dev-user-alice", detail.serviceAccount());
+        assertEquals(null, detail.deployment());
+        assertEquals(null, detail.service());
+        assertEquals("USER_READY", detail.status());
+        assertEquals(null, detail.devcontainerEndpoint());
+    }
+
+    @Test
+    void returnsNotFoundWhenContainerOnlyUserDoesNotExist() {
+        service.provisioningMode = "container-only";
+        mockContainerOnlyUserDetailResources(null, null, null);
+
+        assertThrows(NotFoundException.class, () -> service.getUser("alice"));
+    }
+
+    @Test
     void returnsContainerOnlyConnectionGuideWithoutPortForwardCommand() {
         service.provisioningMode = "container-only";
         mockContainerOnlyUserDetailResources(
-                new ServiceAccountBuilder().withNewMetadata().withName("dev-user-alice").endMetadata().build(),
+                containerOnlyServiceAccount("alice"),
                 new DeploymentBuilder().withNewMetadata().withName("devcontainer-alice").endMetadata().build(),
                 containerOnlyService("alice", 30022)
         );
@@ -410,20 +443,17 @@ class UserProvisioningServiceTest {
 
     @Test
     void listsManagedUserNamespaces() {
+        mockUserDetailResources(
+                namespaceWithLabels(Map.of(
+                        "app.kubernetes.io/managed-by", "cluster-manager",
+                        "cluster-manager.example.com/resource-kind", "user-namespace",
+                        "cluster-manager.example.com/user-id", "alice"
+                )),
+                new ServiceAccountBuilder().withNewMetadata().withName("dev-user").endMetadata().build(),
+                null,
+                null
+        );
         when(namespaces.list()).thenReturn(new NamespaceListBuilder()
-                .addToItems(new NamespaceBuilder()
-                        .withNewMetadata()
-                        .withName("dev-bob")
-                        .withLabels(Map.of(
-                                "app.kubernetes.io/managed-by", "cluster-manager",
-                                "cluster-manager.example.com/resource-kind", "user-namespace",
-                                "cluster-manager.example.com/user-id", "bob"
-                        ))
-                        .endMetadata()
-                        .withNewStatus()
-                        .withPhase("Active")
-                        .endStatus()
-                        .build())
                 .addToItems(new NamespaceBuilder()
                         .withNewMetadata()
                         .withName("kube-system")
@@ -448,12 +478,11 @@ class UserProvisioningServiceTest {
 
         List<UserSummary> users = service.listUsers();
 
-        assertEquals(2, users.size());
+        assertEquals(1, users.size());
         assertEquals("alice", users.get(0).userId());
         assertEquals("dev-alice", users.get(0).namespace());
         assertEquals("Active", users.get(0).phase());
-        assertEquals("bob", users.get(1).userId());
-        assertEquals("dev-bob", users.get(1).namespace());
+        assertEquals("USER_READY", users.get(0).status());
     }
 
     @Test
@@ -461,20 +490,42 @@ class UserProvisioningServiceTest {
         service.provisioningMode = " container-only ";
         service.containerOnlyNamespace = " devcontainers ";
         service.kubernetesClient = mock(KubernetesClient.class);
+        serviceAccountOperation = mock(MixedOperation.class);
+        namespacedServiceAccounts = mock(MixedOperation.class);
+        ServiceAccountResource serviceAccountLookup = mock(ServiceAccountResource.class);
+        when(service.kubernetesClient.serviceAccounts()).thenReturn(serviceAccountOperation);
+        when(serviceAccountOperation.inNamespace("devcontainers")).thenReturn(namespacedServiceAccounts);
+        when(namespacedServiceAccounts.list()).thenReturn(new ServiceAccountListBuilder()
+                .addToItems(containerOnlyServiceAccount("alice"))
+                .build());
+        when(namespacedServiceAccounts.withName("dev-user-alice")).thenReturn(serviceAccountLookup);
+        when(serviceAccountLookup.get()).thenReturn(containerOnlyServiceAccount("alice"));
+
+        AppsAPIGroupDSL apps = mock(AppsAPIGroupDSL.class);
+        MixedOperation<Deployment, DeploymentList, RollableScalableResource<Deployment>> deploymentOperation = mock(MixedOperation.class);
+        MixedOperation<Deployment, DeploymentList, RollableScalableResource<Deployment>> namespacedDeployments = mock(MixedOperation.class);
+        RollableScalableResource<Deployment> deploymentLookup = mock(RollableScalableResource.class);
+        when(service.kubernetesClient.apps()).thenReturn(apps);
+        when(apps.deployments()).thenReturn(deploymentOperation);
+        when(deploymentOperation.inNamespace("devcontainers")).thenReturn(namespacedDeployments);
+        when(namespacedDeployments.withName("devcontainer-alice")).thenReturn(deploymentLookup);
+        when(deploymentLookup.get()).thenReturn(null);
+
         MixedOperation<Service, ServiceList, ServiceResource<Service>> serviceOperation = mock(MixedOperation.class);
         MixedOperation<Service, ServiceList, ServiceResource<Service>> namespacedServices = mock(MixedOperation.class);
+        ServiceResource<Service> serviceLookup = mock(ServiceResource.class);
         when(service.kubernetesClient.services()).thenReturn(serviceOperation);
         when(serviceOperation.inNamespace("devcontainers")).thenReturn(namespacedServices);
-        when(namespacedServices.list()).thenReturn(new ServiceListBuilder()
-                .addToItems(containerOnlyService("alice", 30022))
-                .build());
+        when(namespacedServices.withName("devcontainer-alice")).thenReturn(serviceLookup);
+        when(serviceLookup.get()).thenReturn(null);
+        mockRbacResources("devcontainers", "dev-user-alice", true, true);
 
         List<UserSummary> users = service.listUsers();
 
         assertEquals(1, users.size());
         assertEquals("alice", users.get(0).userId());
         assertEquals("devcontainers", users.get(0).namespace());
-        verify(serviceOperation).inNamespace("devcontainers");
+        assertEquals("USER_READY", users.get(0).status());
     }
 
     @Test
@@ -541,10 +592,10 @@ class UserProvisioningServiceTest {
     private ServiceAccountResource mockUserDetailResources(Namespace namespace, ServiceAccount serviceAccount, Deployment deployment, Service userService) {
         service.kubernetesClient = mock(KubernetesClient.class);
 
-        MixedOperation<Namespace, NamespaceList, Resource<Namespace>> namespaceOperation = mock(MixedOperation.class);
         Resource<Namespace> namespaceLookup = mock(Resource.class);
-        when(service.kubernetesClient.namespaces()).thenReturn(namespaceOperation);
-        when(namespaceOperation.withName("dev-alice")).thenReturn(namespaceLookup);
+        namespaces = mock(MixedOperation.class);
+        when(service.kubernetesClient.namespaces()).thenReturn(namespaces);
+        when(namespaces.withName("dev-alice")).thenReturn(namespaceLookup);
         when(namespaceLookup.get()).thenReturn(namespace);
 
         serviceAccountOperation = mock(MixedOperation.class);
@@ -572,6 +623,8 @@ class UserProvisioningServiceTest {
         when(serviceOperation.inNamespace("dev-alice")).thenReturn(namespacedServices);
         when(namespacedServices.withName("devcontainer")).thenReturn(serviceLookup);
         when(serviceLookup.get()).thenReturn(userService);
+
+        mockRbacResources("dev-alice", "dev-user", true, true);
 
         return serviceAccountLookup;
     }
@@ -604,6 +657,28 @@ class UserProvisioningServiceTest {
         when(serviceOperation.inNamespace("devcontainers")).thenReturn(namespacedServices);
         when(namespacedServices.withName("devcontainer-alice")).thenReturn(serviceLookup);
         when(serviceLookup.get()).thenReturn(userService);
+
+        mockRbacResources("devcontainers", "dev-user-alice", serviceAccount != null, serviceAccount != null);
+    }
+
+    private void mockRbacResources(String namespace, String roleName, boolean roleExists, boolean roleBindingExists) {
+        RbacAPIGroupDSL rbac = mock(RbacAPIGroupDSL.class);
+        MixedOperation<Role, RoleList, Resource<Role>> roleOperation = mock(MixedOperation.class);
+        MixedOperation<Role, RoleList, Resource<Role>> namespacedRoles = mock(MixedOperation.class);
+        Resource<Role> roleLookup = mock(Resource.class);
+        MixedOperation<RoleBinding, RoleBindingList, Resource<RoleBinding>> roleBindingOperation = mock(MixedOperation.class);
+        MixedOperation<RoleBinding, RoleBindingList, Resource<RoleBinding>> namespacedRoleBindings = mock(MixedOperation.class);
+        Resource<RoleBinding> roleBindingLookup = mock(Resource.class);
+
+        when(service.kubernetesClient.rbac()).thenReturn(rbac);
+        when(rbac.roles()).thenReturn(roleOperation);
+        when(roleOperation.inNamespace(namespace)).thenReturn(namespacedRoles);
+        when(namespacedRoles.withName(roleName)).thenReturn(roleLookup);
+        when(roleLookup.get()).thenReturn(roleExists ? new Role() : null);
+        when(rbac.roleBindings()).thenReturn(roleBindingOperation);
+        when(roleBindingOperation.inNamespace(namespace)).thenReturn(namespacedRoleBindings);
+        when(namespacedRoleBindings.withName(roleName)).thenReturn(roleBindingLookup);
+        when(roleBindingLookup.get()).thenReturn(roleBindingExists ? new RoleBinding() : null);
     }
 
     private Service containerOnlyService(String userId, int nodePort) {
@@ -626,6 +701,20 @@ class UserProvisioningServiceTest {
                         .withNodePort(nodePort)
                         .build())
                 .endSpec()
+                .build();
+    }
+
+    private ServiceAccount containerOnlyServiceAccount(String userId) {
+        return new ServiceAccountBuilder()
+                .withNewMetadata()
+                .withName("dev-user-" + userId)
+                .withNamespace("devcontainers")
+                .withLabels(Map.of(
+                        "app.kubernetes.io/managed-by", "cluster-manager",
+                        "cluster-manager.example.com/resource-kind", "service-account",
+                        "cluster-manager.example.com/user-id", userId
+                ))
+                .endMetadata()
                 .build();
     }
 
