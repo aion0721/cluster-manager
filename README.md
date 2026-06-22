@@ -86,6 +86,8 @@ env:
     value: "https://rp.local:6443"
   - name: CLUSTER_MANAGER_KUBECONFIG_INSECURE_SKIP_TLS_VERIFY
     value: "true"
+  - name: CLUSTER_MANAGER_ENVIRONMENT_BASE_IMAGES_CONFIG_PATH
+    value: "/etc/cluster-manager/base-images/images.yaml"
 ```
 
 ## Authentication
@@ -99,7 +101,8 @@ Simple mode is intended for local development or deployments where another trust
 
 ```properties
 cluster-manager.auth.mode=simple
-quarkus.oidc.enabled=false
+%dev.quarkus.oidc.enabled=false
+%test.quarkus.oidc.enabled=false
 ```
 
 Keycloak mode example:
@@ -116,11 +119,13 @@ cluster-manager.admin-user-ids=alice,bob
 
 When deploying with environment variables, set `CLUSTER_MANAGER_AUTH_MODE=keycloak` and the matching `QUARKUS_OIDC_*` values. Keep `cluster-manager.admin-user-ids` aligned with the Keycloak principal claim because admin APIs still use that configured allow-list.
 
+Do not build the production image with an unprofiled `quarkus.oidc.enabled=false`. It is a Quarkus build-time property; if it is disabled while building the image, runtime `QUARKUS_OIDC_ENABLED=true` does not re-enable the bearer authentication mechanism. Keep OIDC disabled only in dev/test profiles unless intentionally building a simple-mode-only image.
+
 ## Provisioning modes
 
 `cluster-manager` supports two provisioning modes:
 
-- `namespace`: the existing mode. Each developer gets a Namespace named `dev-{userId}`. The backend creates the Namespace, ServiceAccount, RBAC, DevContainer Deployment, and ClusterIP Service.
+- `namespace`: each developer gets a Namespace named `dev-{userId}`. User resources live in that Namespace. The DevContainer Service is a ClusterIP Service.
 - `container-only`: the backend does not create a Namespace. It creates user-specific ServiceAccount, RBAC, DevContainer Deployment, and NodePort Service inside `cluster-manager.container-only.namespace`.
 
 Container-only example:
@@ -132,6 +137,109 @@ cluster-manager.devcontainer.ssh-host=rp.local
 ```
 
 For user `alice`, container-only mode creates resources such as `dev-user-alice` and `devcontainer-alice` in the shared Namespace. `/api/me` and `/api/me/connection-guide` include the assigned NodePort Service information and an SSH command such as `ssh -p 30022 rp.local` after Kubernetes assigns the NodePort.
+
+## Admin user and environment APIs
+
+The admin UI separates user setup from DevContainer environment setup. User setup creates identity and permission resources; environment setup creates the Deployment and Service.
+
+User APIs:
+
+- `POST /api/users`: accepts `userId` and optional `displayName`. It creates the user resources only: Namespace in `namespace` mode, ServiceAccount, and RBAC. It does not create a DevContainer Deployment or Service.
+- `GET /api/users`: lists users. The response includes user fields and any environment fields that currently exist.
+- `GET /api/users/{userId}`: returns user detail. If the user resources exist but the environment has not been created yet, the response is still `200` with `deployment`, `service`, and `devcontainerEndpoint` unset.
+- `DELETE /api/users/{userId}`: deletes the user. In `container-only` mode, it deletes Service, Deployment, RoleBinding, Role, and ServiceAccount in that order.
+
+Environment APIs:
+
+- `POST /api/users/{userId}/environment`: creates the DevContainer Deployment and Service for an existing user.
+- `DELETE /api/users/{userId}/environment`: deletes only the DevContainer Service and Deployment.
+- `POST /api/users/{userId}/reconcile`: runs the full reconciliation path and recreates missing user and environment resources.
+- `GET /api/users/{userId}/port-forward-command`: returns the same connection guide shape used by `/api/me/connection-guide`.
+
+`displayName` is stored in Kubernetes annotations, not in a database. The backend returns it as `displayName`; clients do not need to know the annotation key.
+
+Common status values:
+
+- `USER_READY`: ServiceAccount and RBAC are present, but the environment is not created yet.
+- `READY`: user resources and environment resources are present.
+- `PARTIAL`: some expected resources are missing.
+- `DELETING`: the Namespace is being deleted.
+
+Provisioning step metadata is available from `GET /api/provisioning-steps`. Each step includes a `group` field:
+
+- `users`: `namespace`, `serviceAccount`, `rbac`
+- `pods`: `devcontainer`, `service`
+
+## Environment base images
+
+Environment creation can select a configured base image by ID. The frontend sends only the image ID; the backend validates it against an allow-list and resolves it to the real container image.
+
+```http
+GET /api/environment-base-images
+```
+
+Response fields:
+
+- `id`
+- `label`
+- `description`
+- `default`
+- `image`, only when image exposure is enabled
+
+Create an environment with a selected base image:
+
+```http
+POST /api/users/alice/environment
+Content-Type: application/json
+
+{
+  "baseImage": "node-dev"
+}
+```
+
+If `baseImage` is omitted, the configured default image is used. Unknown IDs return `400 Bad Request`.
+
+For operations, mount the base image catalog from a ConfigMap:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-manager-base-images
+  namespace: cluster-manager-system
+data:
+  images.yaml: |
+    exposeImage: false
+    images:
+      - id: ubuntu
+        label: Ubuntu
+        description: Ubuntu base image
+        image: ubuntu:24.04
+        default: true
+      - id: node-dev
+        label: Node.js
+        description: Node.js development image
+        image: node:22-bookworm
+        default: false
+```
+
+Mount it into the backend Deployment and point the backend to the file:
+
+```yaml
+env:
+  - name: CLUSTER_MANAGER_ENVIRONMENT_BASE_IMAGES_CONFIG_PATH
+    value: "/etc/cluster-manager/base-images/images.yaml"
+volumeMounts:
+  - name: base-images
+    mountPath: /etc/cluster-manager/base-images
+    readOnly: true
+volumes:
+  - name: base-images
+    configMap:
+      name: cluster-manager-base-images
+```
+
+If the ConfigMap is not configured or the mounted file does not exist, the backend falls back to `cluster-manager.devcontainer.image` as a single default base image. By default the API does not expose the real image string. Set `cluster-manager.environment-base-images.expose-image=true` or `exposeImage: true` in the catalog if the UI should display it.
 
 ## Creating a native executable
 
