@@ -201,10 +201,9 @@ public class UserProvisioningService {
     public ServiceAccountTokenResponse createServiceAccountToken(String userId) {
         validateUserId(userId);
         String namespaceName = workloadNamespace(userId);
-        if (mode() != ProvisioningMode.NAMESPACE) {
-            throw new BadRequestException("ServiceAccount token API is available only in namespace mode.");
+        if (mode() == ProvisioningMode.NAMESPACE) {
+            getManagedNamespace(userId);
         }
-        getManagedNamespace(userId);
 
         ServiceAccount serviceAccount = kubernetesClient.serviceAccounts()
                 .inNamespace(namespaceName)
@@ -212,6 +211,9 @@ public class UserProvisioningService {
                 .get();
         if (serviceAccount == null) {
             throw new NotFoundException("ServiceAccount not found: " + namespaceName + "/" + serviceAccountName(userId));
+        }
+        if (mode() == ProvisioningMode.CONTAINER_ONLY) {
+            assertManagedUserServiceAccount(serviceAccount, userId);
         }
 
         TokenRequest tokenRequest = kubernetesClient.serviceAccounts()
@@ -235,6 +237,9 @@ public class UserProvisioningService {
         ServiceAccountTokenResponse token = createServiceAccountToken(userId);
         String contextName = token.namespace() + "@" + kubeconfigClusterName;
         String credentialName = token.namespace() + "-user";
+        String verificationCommand = mode() == ProvisioningMode.NAMESPACE
+                ? "kubectl get pods"
+                : "kubectl get svc " + serviceName(userId);
 
         String powershell = String.join(System.lineSeparator(),
                 "kubectl config set-cluster " + kubeconfigClusterName
@@ -246,7 +251,7 @@ public class UserProvisioningService {
                         + " --user=" + credentialName
                         + " --namespace=" + token.namespace(),
                 "kubectl config use-context " + contextName,
-                "kubectl get pods"
+                verificationCommand
         );
 
         String bash = String.join(System.lineSeparator(),
@@ -259,7 +264,7 @@ public class UserProvisioningService {
                         + " --user=" + credentialName
                         + " --namespace=" + token.namespace(),
                 "kubectl config use-context " + contextName,
-                "kubectl get pods"
+                verificationCommand
         );
 
         return new KubectlSetupCommandResponse(

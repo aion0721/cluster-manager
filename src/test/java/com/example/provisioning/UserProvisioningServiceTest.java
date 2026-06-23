@@ -409,6 +409,28 @@ class UserProvisioningServiceTest {
     }
 
     @Test
+    void createsContainerOnlyServiceAccountToken() {
+        service.provisioningMode = "container-only";
+        mockContainerOnlyUserDetailResources(containerOnlyServiceAccount("alice"), null, null);
+        when(namespacedServiceAccounts.withName("dev-user-alice").tokenRequest(any()))
+                .thenReturn(new TokenRequestBuilder()
+                        .withNewStatus()
+                        .withToken("token-value")
+                        .withExpirationTimestamp("2026-05-23T10:00:00Z")
+                        .endStatus()
+                        .build());
+        org.mockito.Mockito.clearInvocations(serviceAccountOperation, namespacedServiceAccounts);
+
+        com.example.me.ServiceAccountTokenResponse response = service.createServiceAccountToken("alice");
+
+        assertEquals("token-value", response.token());
+        assertEquals("devcontainers", response.namespace());
+        assertEquals("dev-user-alice", response.serviceAccount());
+        verify(serviceAccountOperation, times(2)).inNamespace("devcontainers");
+        verify(namespacedServiceAccounts, times(2)).withName("dev-user-alice");
+    }
+
+    @Test
     void returnsKubectlSetupCommandWithPowerShellAndBash() {
         ServiceAccountResource serviceAccountLookup = mockUserDetailResources(
                 namespaceWithLabels(Map.of(
@@ -444,6 +466,29 @@ class UserProvisioningServiceTest {
         verify(serviceAccountLookup).tokenRequest(any());
         verify(serviceAccountOperation, times(2)).inNamespace("dev-alice");
         verify(namespacedServiceAccounts, times(2)).withName("dev-user");
+    }
+
+    @Test
+    void returnsContainerOnlyKubectlSetupCommandForSharedNamespace() {
+        service.provisioningMode = "container-only";
+        mockContainerOnlyUserDetailResources(containerOnlyServiceAccount("alice"), null, null);
+        when(namespacedServiceAccounts.withName("dev-user-alice").tokenRequest(any()))
+                .thenReturn(new TokenRequestBuilder()
+                        .withNewStatus()
+                        .withToken("token-value")
+                        .withExpirationTimestamp("2026-05-23T10:00:00Z")
+                        .endStatus()
+                        .build());
+
+        com.example.me.KubectlSetupCommandResponse response = service.kubectlSetupCommand("alice");
+
+        assertEquals("devcontainers", response.namespace());
+        assertEquals("dev-user-alice", response.serviceAccount());
+        assertEquals("devcontainers@k3s", response.contextName());
+        assertEquals("devcontainers-user", response.credentialName());
+        org.junit.jupiter.api.Assertions.assertTrue(response.powershell().contains("kubectl config set-context devcontainers@k3s --cluster=k3s --user=devcontainers-user --namespace=devcontainers"));
+        org.junit.jupiter.api.Assertions.assertTrue(response.powershell().contains("kubectl get svc devcontainer-alice"));
+        org.junit.jupiter.api.Assertions.assertTrue(response.bash().contains("kubectl get svc devcontainer-alice"));
     }
 
     @Test
