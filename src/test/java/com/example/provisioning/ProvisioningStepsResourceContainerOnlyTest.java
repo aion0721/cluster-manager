@@ -24,21 +24,11 @@ class ProvisioningStepsResourceContainerOnlyTest {
                 .when().get("/api/provisioning-steps")
                 .then()
                 .statusCode(200)
-                .body("size()", equalTo(4))
-                .body("key", contains(
-                        "serviceAccount",
-                        "rbac",
-                        "devcontainer",
-                        "service"
-                ))
-                .body("group", contains(
-                        "users",
-                        "users",
-                        "pods",
-                        "pods"
-                ))
+                .body("size()", equalTo(3))
+                .body("key", contains("serviceAccount", "rbac", "devcontainer"))
+                .body("group", contains("users", "users", "pods"))
                 .body("key", not(hasItem("namespace")))
-                .body("order", contains(1, 2, 3, 4));
+                .body("order", contains(1, 2, 3));
     }
 
     public static class ContainerOnlyProfile implements QuarkusTestProfile {
