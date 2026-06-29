@@ -18,15 +18,13 @@ public final class ProvisioningSteps {
             NAMESPACE_STEP,
             serviceAccountStep(2),
             rbacStep(3),
-            devcontainerStep(4),
-            serviceStep(5)
+            devcontainerStep(4)
     );
 
     private static final List<ProvisioningStep> CONTAINER_ONLY_STEPS = List.of(
             serviceAccountStep(1),
             rbacStep(2),
-            devcontainerStep(3),
-            serviceStep(4)
+            devcontainerStep(3)
     );
 
     private ProvisioningSteps() {
@@ -65,21 +63,9 @@ public final class ProvisioningSteps {
                 "devcontainer",
                 "pods",
                 "DevContainer",
-                "Create or update the user's DevContainer Deployment.",
+                "Create or update the user's DevContainer StatefulSet.",
                 "POST",
                 "/api/users/{userId}/devcontainer",
-                order
-        );
-    }
-
-    private static ProvisioningStep serviceStep(int order) {
-        return new ProvisioningStep(
-                "service",
-                "pods",
-                "Service",
-                "Create or update the Service for the user's DevContainer.",
-                "POST",
-                "/api/users/{userId}/service",
                 order
         );
     }

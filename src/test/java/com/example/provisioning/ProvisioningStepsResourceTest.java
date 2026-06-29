@@ -17,30 +17,17 @@ class ProvisioningStepsResourceTest {
                 .when().get("/api/provisioning-steps")
                 .then()
                 .statusCode(200)
-                .body("size()", equalTo(5))
-                .body("key", contains(
-                        "namespace",
-                        "serviceAccount",
-                        "rbac",
-                        "devcontainer",
-                        "service"
-                ))
-                .body("group", contains(
-                        "users",
-                        "users",
-                        "users",
-                        "pods",
-                        "pods"
-                ))
-                .body("method", contains("POST", "POST", "POST", "POST", "POST"))
+                .body("size()", equalTo(4))
+                .body("key", contains("namespace", "serviceAccount", "rbac", "devcontainer"))
+                .body("group", contains("users", "users", "users", "pods"))
+                .body("method", contains("POST", "POST", "POST", "POST"))
                 .body("endpointTemplate", contains(
                         "/api/users/{userId}/namespace",
                         "/api/users/{userId}/service-account",
                         "/api/users/{userId}/rbac",
-                        "/api/users/{userId}/devcontainer",
-                        "/api/users/{userId}/service"
+                        "/api/users/{userId}/devcontainer"
                 ))
-                .body("order", contains(1, 2, 3, 4, 5));
+                .body("order", contains(1, 2, 3, 4));
     }
 
     @Test

@@ -16,8 +16,7 @@ import io.fabric8.kubernetes.api.model.PodTemplateSpecBuilder;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServiceAccountBuilder;
 import io.fabric8.kubernetes.api.model.ServiceBuilder;
-import io.fabric8.kubernetes.api.model.ServicePortBuilder;
-import io.fabric8.kubernetes.api.model.apps.DeploymentBuilder;
+import io.fabric8.kubernetes.api.model.apps.StatefulSetBuilder;
 import io.fabric8.kubernetes.api.model.rbac.PolicyRule;
 import io.fabric8.kubernetes.api.model.rbac.PolicyRuleBuilder;
 import io.fabric8.kubernetes.api.model.rbac.RoleBindingBuilder;
@@ -68,14 +67,9 @@ public class UserProvisioningService {
     @ConfigProperty(name = "cluster-manager.devcontainer.service-account")
     String serviceAccountName;
 
-    @ConfigProperty(name = "cluster-manager.devcontainer.deployment-name")
+    @ConfigProperty(name = "cluster-manager.devcontainer.workload-name")
     String deploymentName;
 
-    @ConfigProperty(name = "cluster-manager.devcontainer.service-name")
-    String serviceName;
-
-    @ConfigProperty(name = "cluster-manager.devcontainer.service-type")
-    String serviceType;
 
     @ConfigProperty(name = "cluster-manager.devcontainer.ssh-host")
     String sshHost;
@@ -136,18 +130,12 @@ public class UserProvisioningService {
                 .inNamespace(namespaceName)
                 .withName(serviceAccountName(userId))
                 .get() != null;
-        boolean deploymentExists = kubernetesClient.apps().deployments()
+        boolean deploymentExists = kubernetesClient.apps().statefulSets()
                 .inNamespace(namespaceName)
                 .withName(deploymentName(userId))
                 .get() != null;
-        Service userService = kubernetesClient.services()
-                .inNamespace(namespaceName)
-                .withName(serviceName(userId))
-                .get();
-        if (mode() == ProvisioningMode.CONTAINER_ONLY && userService != null) {
-            assertManagedUserService(userService, userId);
-        }
-        boolean serviceExists = userService != null;
+        Service userService = null;
+        boolean serviceExists = false;
         if (mode() == ProvisioningMode.CONTAINER_ONLY && !serviceAccountExists && !roleExists && !roleBindingExists) {
             throw new NotFoundException("User not found for userId: " + userId);
         }
@@ -159,11 +147,11 @@ public class UserProvisioningService {
                 namespace == null || namespace.getStatus() == null ? null : namespace.getStatus().getPhase(),
                 serviceAccountExists ? serviceAccountName(userId) : null,
                 deploymentExists ? deploymentName(userId) : null,
-                serviceExists ? serviceName(userId) : null,
+                null,
                 userStatus(namespace, serviceAccountExists, roleExists, roleBindingExists, deploymentExists, serviceExists),
                 createdAt(namespace, userService),
                 mode().configValue(),
-                endpoint(userService)
+                null
         );
     }
 
@@ -174,27 +162,18 @@ public class UserProvisioningService {
             getManagedNamespace(userId);
         }
 
-        Service userService = kubernetesClient.services()
-                .inNamespace(namespaceName)
-                .withName(serviceName(userId))
-                .get();
-        if (mode() == ProvisioningMode.CONTAINER_ONLY && userService != null) {
-            assertManagedUserService(userService, userId);
-        }
-        DevcontainerEndpoint endpoint = endpoint(userService);
-        String portForwardCommand = mode() == ProvisioningMode.NAMESPACE
-                ? "kubectl -n " + namespaceName + " port-forward svc/" + serviceName(userId) + " 2222:22"
-                : null;
+        String podName = podName(userId);
+        String portForwardCommand = "kubectl -n " + namespaceName + " port-forward pod/" + podName + " 2222:22";
         return new ConnectionGuide(
                 namespaceName,
                 serviceAccountName(userId),
                 portForwardCommand,
-                endpoint == null ? serviceName(userId) : endpoint.service(),
-                endpoint == null ? null : endpoint.serviceType(),
-                endpoint == null ? null : endpoint.servicePort(),
-                endpoint == null ? null : endpoint.nodePort(),
-                endpoint == null ? sshHost : endpoint.sshHost(),
-                endpoint == null ? null : endpoint.sshCommand()
+                null,
+                null,
+                null,
+                null,
+                sshHost,
+                "ssh -p 2222 localhost"
         );
     }
 
@@ -237,9 +216,7 @@ public class UserProvisioningService {
         ServiceAccountTokenResponse token = createServiceAccountToken(userId);
         String contextName = token.namespace() + "@" + kubeconfigClusterName;
         String credentialName = token.namespace() + "-user";
-        String verificationCommand = mode() == ProvisioningMode.NAMESPACE
-                ? "kubectl get pods"
-                : "kubectl get svc " + serviceName(userId);
+        String verificationCommand = "kubectl get pod " + podName(userId);
 
         String powershell = String.join(System.lineSeparator(),
                 "kubectl config set-cluster " + kubeconfigClusterName
@@ -289,7 +266,6 @@ public class UserProvisioningService {
         results.add(ensureServiceAccount(userId));
         results.add(ensureRbac(userId));
         results.add(ensureDevcontainer(userId));
-        results.add(ensureService(userId));
 
         return new UserProvisioningResult(userId, workloadNamespace(userId), results);
     }
@@ -316,7 +292,6 @@ public class UserProvisioningService {
 
         List<ProvisioningStepResult> results = new ArrayList<>();
         results.add(ensureDevcontainer(userId, baseImageId));
-        results.add(ensureService(userId, false));
 
         return new UserProvisioningResult(userId, workloadNamespace(userId), results);
     }
@@ -434,16 +409,17 @@ public class UserProvisioningService {
                 : environmentBaseImageCatalog.resolveImage(baseImageId);
 
         Map<String, String> selectorLabels = devcontainerLabels(userId);
-        kubernetesClient.apps().deployments()
+        kubernetesClient.apps().statefulSets()
                 .inNamespace(namespaceName)
-                .resource(new DeploymentBuilder()
+                .resource(new StatefulSetBuilder()
                         .withMetadata(new ObjectMetaBuilder()
                                 .withName(deploymentName(userId))
                                 .withNamespace(namespaceName)
-                                .withLabels(userResourceLabels(userId, "deployment"))
+                                .withLabels(userResourceLabels(userId, "statefulset"))
                                 .build())
                         .withNewSpec()
                         .withReplicas(1)
+                        .withServiceName(deploymentName(userId))
                         .withNewSelector()
                         .withMatchLabels(selectorLabels)
                         .endSelector()
@@ -465,41 +441,17 @@ public class UserProvisioningService {
                         .build())
                 .createOrReplace();
 
-        return completed("devcontainer", namespaceName, "DevContainer Deployment created or updated.");
+        return completed("devcontainer", namespaceName, "DevContainer StatefulSet created or updated.");
     }
 
     public ProvisioningStepResult ensureService(String userId) {
-        return ensureService(userId, true);
-    }
-
-    private ProvisioningStepResult ensureService(String userId, boolean ensureDevcontainer) {
         validateUserId(userId);
         String namespaceName = workloadNamespace(userId);
-        if (ensureDevcontainer) {
-            ensureDevcontainer(userId);
-        }
-
         kubernetesClient.services()
                 .inNamespace(namespaceName)
-                .resource(new ServiceBuilder()
-                        .withMetadata(new ObjectMetaBuilder()
-                                .withName(serviceName(userId))
-                                .withNamespace(namespaceName)
-                                .withLabels(userResourceLabels(userId, "service"))
-                                .build())
-                        .withNewSpec()
-                        .withType(serviceTypeForMode())
-                        .withSelector(devcontainerLabels(userId))
-                        .withPorts(new ServicePortBuilder()
-                                .withName("ssh")
-                                .withPort(22)
-                                .withNewTargetPort(22)
-                                .build())
-                        .endSpec()
-                        .build())
-                .createOrReplace();
-
-        return completed("service", namespaceName, "DevContainer Service created or updated.");
+                .withName(serviceName(userId))
+                .delete();
+        return completed("service", namespaceName, "DevContainer Service removed; port-forward targets the StatefulSet Pod directly.");
     }
 
     public UserDeletionResult deleteEnvironment(String userId) {
@@ -522,7 +474,7 @@ public class UserProvisioningService {
                 .inNamespace(namespaceName)
                 .withName(serviceName(userId))
                 .delete();
-        kubernetesClient.apps().deployments()
+        kubernetesClient.apps().statefulSets()
                 .inNamespace(namespaceName)
                 .withName(deploymentName(userId))
                 .delete();
@@ -547,7 +499,7 @@ public class UserProvisioningService {
                     .inNamespace(namespaceName)
                     .withName(serviceName(userId))
                     .delete();
-            kubernetesClient.apps().deployments()
+            kubernetesClient.apps().statefulSets()
                     .inNamespace(namespaceName)
                     .withName(deploymentName(userId))
                     .delete();
@@ -639,14 +591,14 @@ public class UserProvisioningService {
             return "DELETING";
         }
         boolean userReady = serviceAccountExists && roleExists && roleBindingExists;
-        boolean environmentReady = deploymentExists && serviceExists;
-        if (userReady && !deploymentExists && !serviceExists) {
+        boolean environmentReady = deploymentExists;
+        if (userReady && !deploymentExists) {
             return "USER_READY";
         }
         if (userReady && environmentReady) {
             return "READY";
         }
-        if (serviceAccountExists && deploymentExists && serviceExists) {
+        if (serviceAccountExists && deploymentExists) {
             return "READY";
         }
         return "PARTIAL";
@@ -677,7 +629,11 @@ public class UserProvisioningService {
     }
 
     private String serviceName(String userId) {
-        return resourceName(serviceName, userId);
+        return deploymentName(userId);
+    }
+
+    private String podName(String userId) {
+        return deploymentName(userId) + "-0";
     }
 
     private String resourceName(String baseName, String userId) {
@@ -687,29 +643,39 @@ public class UserProvisioningService {
         return baseName + "-" + userId;
     }
 
-    private String serviceTypeForMode() {
-        return mode() == ProvisioningMode.CONTAINER_ONLY ? "NodePort" : serviceType;
-    }
 
     private List<PolicyRule> rbacRules(String userId) {
         if (mode() == ProvisioningMode.NAMESPACE) {
-            return List.of(new PolicyRuleBuilder()
-                    .withApiGroups("", "apps")
-                    .withResources("pods", "pods/log", "services", "deployments")
-                    .withVerbs("get", "list", "watch")
-                    .build());
+            return List.of(
+                    new PolicyRuleBuilder()
+                            .withApiGroups("", "apps")
+                            .withResources("pods", "pods/log", "statefulsets")
+                            .withVerbs("get", "list", "watch")
+                            .build(),
+                    new PolicyRuleBuilder()
+                            .withApiGroups("")
+                            .withResources("pods/portforward")
+                            .withVerbs("create")
+                            .build()
+            );
         }
 
         return List.of(
                 new PolicyRuleBuilder()
                         .withApiGroups("")
-                        .withResources("services")
-                        .withResourceNames(serviceName(userId))
+                        .withResources("pods", "pods/log")
+                        .withResourceNames(podName(userId))
                         .withVerbs("get")
                         .build(),
                 new PolicyRuleBuilder()
+                        .withApiGroups("")
+                        .withResources("pods/portforward")
+                        .withResourceNames(podName(userId))
+                        .withVerbs("create")
+                        .build(),
+                new PolicyRuleBuilder()
                         .withApiGroups("apps")
-                        .withResources("deployments")
+                        .withResources("statefulsets")
                         .withResourceNames(deploymentName(userId))
                         .withVerbs("get")
                         .build()
@@ -804,8 +770,7 @@ public class UserProvisioningService {
         }
         if (mode() == ProvisioningMode.CONTAINER_ONLY) {
             validateResourceName(serviceAccountName(userId), "serviceAccount name");
-            validateResourceName(deploymentName(userId), "deployment name");
-            validateResourceName(serviceName(userId), "service name");
+            validateResourceName(deploymentName(userId), "statefulSet name");
         }
     }
 
